@@ -1,0 +1,281 @@
+import { LogicRule } from '../types/logic';
+
+export const LOGIC_RULES: LogicRule[] = [
+  // CONJUNCIÓN (∧)
+  {
+    id: 'intro_and',
+    name: 'Introducción de la Conjunción',
+    uocNotation: 'I∧',
+    connective: 'and',
+    category: 'introduction',
+    description: 'Si tienes demostradas dos fórmulas por separado, puedes unirlas con una "y" (∧).',
+    whenToUse: 'Úsala cuando tu objetivo final o intermedio sea de la forma (α ∧ β).',
+    examTip: '¡Muy sencilla! Solo necesitas dos líneas previas en cualquier orden.',
+    formalSchema: {
+      premises: ['Line i: α', 'Line j: β'],
+      conclusion: 'Line k: α ∧ β  (I∧ i, j)',
+    },
+    humanExample: {
+      premises: ['"Está lloviendo"', '"Hace frío"'],
+      conclusion: '"Está lloviendo y hace frío"',
+    },
+  },
+  {
+    id: 'elim_and_1',
+    name: 'Eliminación de la Conjunción (Izq.)',
+    uocNotation: 'E∧₁',
+    connective: 'and',
+    category: 'elimination',
+    description: 'Si tienes una conjunción (α ∧ β), puedes extraer la parte izquierda (α).',
+    whenToUse: 'Úsala para "desempaquetar" premisas compuestas con ∧ y obtener sus piezas.',
+    examTip: 'A menudo en la UOC basta con poner "E∧" indicando la línea original.',
+    formalSchema: {
+      premises: ['Line i: α ∧ β'],
+      conclusion: 'Line k: α  (E∧₁ i)',
+    },
+    humanExample: {
+      premises: ['"Tengo examen de lógica y he estudiado mucho"'],
+      conclusion: '"Tengo examen de lógica"',
+    },
+  },
+  {
+    id: 'elim_and_2',
+    name: 'Eliminación de la Conjunción (Der.)',
+    uocNotation: 'E∧₂',
+    connective: 'and',
+    category: 'elimination',
+    description: 'Si tienes una conjunción (α ∧ β), puedes extraer la parte derecha (β).',
+    whenToUse: 'Úsala para extraer el segundo miembro de una conjunción existente.',
+    examTip: 'No te compliques: si tienes A ∧ B, puedes sacar tanto A como B en líneas separadas.',
+    formalSchema: {
+      premises: ['Line i: α ∧ β'],
+      conclusion: 'Line k: β  (E∧₂ i)',
+    },
+    humanExample: {
+      premises: ['"Tengo examen de lógica y he estudiado mucho"'],
+      conclusion: '"He estudiado mucho"',
+    },
+  },
+
+  // IMPLICACIÓN (→)
+  {
+    id: 'elim_imp',
+    name: 'Eliminación del Condicional',
+    latinName: 'Modus Ponens (MP)',
+    uocNotation: 'E→ (MP)',
+    connective: 'implies',
+    category: 'elimination',
+    description: 'Si ocurre una implicación (α → β) y además ocurre el antecedente (α), se deduce el consecuente (β).',
+    whenToUse: '¡La regla rey de la lógica! Úsala siempre que tengas un condicional y su "llave" de activación.',
+    examTip: 'Cuidado con la trampa típica: tener α → β y tener β NO te permite deducir α (eso es la falacia de afirmación del consecuente).',
+    formalSchema: {
+      premises: ['Line i: α → β', 'Line j: α'],
+      conclusion: 'Line k: β  (E→ i, j)',
+    },
+    humanExample: {
+      premises: ['"Si apruebo lógica, celebro con pizza"', '"He aprobado lógica"'],
+      conclusion: '"Celebro con pizza"',
+    },
+  },
+  {
+    id: 'intro_imp',
+    name: 'Introducción del Condicional',
+    latinName: 'Teorema de Deducción',
+    uocNotation: 'I→',
+    connective: 'implies',
+    category: 'introduction',
+    description: 'Para demostrar (α → β), abres una hipótesis temporal con α. Si razonando logras llegar a β, cierras la caja y concluyes α → β.',
+    whenToUse: 'Siempre que la fórmula que te pidan demostrar tenga una flecha principal: X → Y.',
+    examTip: '¡Clave de oro UOC! Al cerrar la caja, la hipótesis se descarga; nunca puedes volver a usar líneas de dentro de una caja cerrada.',
+    formalSchema: {
+      premises: ['┌ [Hipótesis]: α', '│ ...', '└ Line j: β'],
+      conclusion: 'Line k: α → β  (I→ i-j)',
+      condition: 'Descarga la hipótesis α',
+    },
+    humanExample: {
+      premises: ['Supongamos que "estudio 2 horas diarias". Llegamos a que "saco matrícula".'],
+      conclusion: '"Si estudio 2 horas diarias → saco matrícula"',
+    },
+  },
+  {
+    id: 'modus_tollens',
+    name: 'Modus Tollens',
+    latinName: 'Modus Tollendo Tollens',
+    uocNotation: 'MT',
+    connective: 'implies',
+    category: 'derived',
+    description: 'Si tienes (α → β) y sabes que NO ocurre el consecuente (¬β), deduces que tampoco ocurrió el antecedente (¬α).',
+    whenToUse: 'Úsala para refutar o descartar el antecedente.',
+    examTip: 'En la UOC suele permitirse como regla derivada directa. (Si no, se demuestra con I¬ y E→).',
+    formalSchema: {
+      premises: ['Line i: α → β', 'Line j: ¬β'],
+      conclusion: 'Line k: ¬α  (MT i, j)',
+    },
+    humanExample: {
+      premises: ['"Si llueve, la calle se moja"', '"La calle NO está mojada"'],
+      conclusion: '"Por lo tanto, no llueve"',
+    },
+  },
+
+  // DISYUNCIÓN (∨)
+  {
+    id: 'intro_or_1',
+    name: 'Introducción de la Disyunción (Izq.)',
+    uocNotation: 'I∨₁',
+    connective: 'or',
+    category: 'introduction',
+    description: 'Si tienes demostrada una fórmula α, puedes añadirle "o cualquier cosa" (α ∨ β).',
+    whenToUse: 'Cuando necesitas fabricar una disyunción para alimentar un condicional o encajar con la meta.',
+    examTip: 'Parece magia: si sabes que "es martes", puedes deducir "es martes o los elefantes vuelan". ¡Es 100% legal!',
+    formalSchema: {
+      premises: ['Line i: α'],
+      conclusion: 'Line k: α ∨ β  (I∨₁ i)',
+    },
+    humanExample: {
+      premises: ['"He ganado la partida"'],
+      conclusion: '"He ganado la partida O el juego está trucado"',
+    },
+  },
+  {
+    id: 'intro_or_2',
+    name: 'Introducción de la Disyunción (Der.)',
+    uocNotation: 'I∨₂',
+    connective: 'or',
+    category: 'introduction',
+    description: 'Si tienes β, puedes añadirle algo a la izquierda formando (α ∨ β).',
+    whenToUse: 'Similar a I∨₁, para colocar la fórmula que ya posees en el lado derecho de la disyunción.',
+    examTip: 'Elige I∨₁ o I∨₂ según la posición que ocupe tu fórmula conocida en la disyunción destino.',
+    formalSchema: {
+      premises: ['Line i: β'],
+      conclusion: 'Line k: α ∨ β  (I∨₂ i)',
+    },
+    humanExample: {
+      premises: ['"Tengo sed"'],
+      conclusion: '"Tengo hambre O tengo sed"',
+    },
+  },
+  {
+    id: 'elim_or',
+    name: 'Eliminación de la Disyunción',
+    latinName: 'Prueba por Casos',
+    uocNotation: 'E∨',
+    connective: 'or',
+    category: 'elimination',
+    description: 'Si sabes (α ∨ β), abres dos cajas separadas: una suponiendo α y llegando a γ, y otra suponiendo β y llegando a γ. Como se llega a γ en ambos casos, concluyes γ.',
+    whenToUse: 'Cuando tienes una premisa disyuntiva α ∨ β y quieres extraer una conclusión común.',
+    examTip: '¡El monstruo de los exámenes! Requiere DOS subderivaciones que terminen en la misma fórmula γ.',
+    formalSchema: {
+      premises: [
+        'Line i: α ∨ β',
+        '┌ [Caso 1]: α  ...  Line m: γ',
+        '┌ [Caso 2]: β  ...  Line n: γ',
+      ],
+      conclusion: 'Line k: γ  (E∨ i, caso1, caso2)',
+    },
+    humanExample: {
+      premises: [
+        '"Voy en tren o voy en autobús"',
+        'Caso tren: llego a Barcelona',
+        'Caso autobús: llego a Barcelona',
+      ],
+      conclusion: '"En cualquier caso, llego a Barcelona"',
+    },
+  },
+  {
+    id: 'disjunctive_syllogism',
+    name: 'Silogismo Disyuntivo',
+    latinName: 'Modus Tollendo Ponens',
+    uocNotation: 'SD (MTP)',
+    connective: 'or',
+    category: 'derived',
+    description: 'Si tienes (α ∨ β) y sabes que uno de ellos NO ocurre (¬α), obligatoriamente ocurre el otro (β).',
+    whenToUse: 'Para descartar opciones cuando una alternativa está negada.',
+    examTip: 'Aceptado comúnmente en la UOC como atajo útil para evitar hacer una prueba por casos completa.',
+    formalSchema: {
+      premises: ['Line i: α ∨ β', 'Line j: ¬α'],
+      conclusion: 'Line k: β  (SD i, j)',
+    },
+    humanExample: {
+      premises: ['"El culpable es el mayordomo o el chófer"', '"El mayordomo tiene coartada (¬mayordomo)"'],
+      conclusion: '"El culpable es el chófer"',
+    },
+  },
+
+  // NEGACIÓN (¬) Y ABSURDO (⊥)
+  {
+    id: 'elim_not',
+    name: 'Eliminación de la Negación',
+    latinName: 'Principio de Contradicción',
+    uocNotation: 'E¬ (o I⊥)',
+    connective: 'falsum',
+    category: 'elimination',
+    description: 'Si tienes una fórmula α y a la vez su negación ¬α, se produce una contradicción / absurdo (⊥).',
+    whenToUse: 'Úsala para generar la señal de alarma ⊥ cuando estás dentro de una reducción al absurdo.',
+    examTip: 'En cuanto detectes P y ¬P en tu demostración, combínalos inmediatamente para obtener ⊥.',
+    formalSchema: {
+      premises: ['Line i: α', 'Line j: ¬α'],
+      conclusion: 'Line k: ⊥  (E¬ i, j)',
+    },
+    humanExample: {
+      premises: ['"La puerta está abierta"', '"La puerta NO está abierta"'],
+      conclusion: '"¡Contradicción! (⊥ Imposible)"',
+    },
+  },
+  {
+    id: 'intro_not',
+    name: 'Introducción de la Negación',
+    latinName: 'Reductio ad Absurdum',
+    uocNotation: 'I¬',
+    connective: 'not',
+    category: 'introduction',
+    description: 'Para demostrar ¬α, supones temporalmente α. Si llegas a una contradicción (⊥), cierras la caja y concluyes ¬α.',
+    whenToUse: 'Cuando la meta que buscas demostrar tiene un signo ¬ delante.',
+    examTip: 'Si quieres demostrar ¬P, abre una caja con hipótesis P y busca desesperadamente un choque contradictorio.',
+    formalSchema: {
+      premises: ['┌ [Hipótesis]: α', '│ ...', '└ Line j: ⊥'],
+      conclusion: 'Line k: ¬α  (I¬ i-j)',
+    },
+    humanExample: {
+      premises: ['Supongamos que "los cerdos vuelan". Esto nos lleva a que "la gravedad no existe" (absurdo ⊥).'],
+      conclusion: '"Por lo tanto, los cerdos NO vuelan"',
+    },
+  },
+  {
+    id: 'double_negation',
+    name: 'Eliminación de la Doble Negación',
+    latinName: 'Doble Negación',
+    uocNotation: 'E¬¬ (DN)',
+    connective: 'not',
+    category: 'elimination',
+    description: 'Dos negaciones seguidas se anulan: de ¬¬α se deduce directamente α.',
+    whenToUse: 'Para quitarte de encima el doble símbolo ¬¬.',
+    examTip: 'Regla de la lógica clásica. Te permite volver a una afirmación positiva.',
+    formalSchema: {
+      premises: ['Line i: ¬¬α'],
+      conclusion: 'Line k: α  (E¬¬ i)',
+    },
+    humanExample: {
+      premises: ['"No es cierto que no haya estudiado"'],
+      conclusion: '"He estudiado"',
+    },
+  },
+  {
+    id: 'classical_raa',
+    name: 'Reducción al Absurdo Clásica',
+    latinName: 'RAA Clásico',
+    uocNotation: 'RAA',
+    connective: 'not',
+    category: 'derived',
+    description: 'Para demostrar una fórmula positiva α, supones temporalmente su negación ¬α. Al llegar a ⊥, concluyes α.',
+    whenToUse: 'Cuando estás atascado intentando demostrar una fórmula positiva y ninguna otra regla avanza.',
+    examTip: '¡El comodín infalible! Si no sabes cómo empezar a demostrar α, abre [Hipótesis: ¬α] y busca ⊥.',
+    formalSchema: {
+      premises: ['┌ [Hipótesis]: ¬α', '│ ...', '└ Line j: ⊥'],
+      conclusion: 'Line k: α  (RAA i-j)',
+    },
+    humanExample: {
+      premises: ['Supongamos que "el servidor no está funcionando". Llegamos a un conflicto con los registros (⊥).'],
+      conclusion: '"El servidor sí está funcionando"',
+    },
+  },
+];
