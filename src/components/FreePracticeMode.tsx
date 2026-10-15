@@ -16,14 +16,29 @@ import {
   ChevronLeft,
   Lightbulb,
   Award,
+  Lock,
+  Compass,
+  ShieldAlert,
 } from 'lucide-react';
 import { HUNDRED_EXERCISES } from '../data/hundredExercises';
 import { LOGIC_RULES } from '../data/rules';
-import { FreeExercise, ProofStep, ExerciseSavedState } from '../types/logic';
+import {
+  FreeExercise,
+  ProofStep,
+  ExerciseSavedState,
+  NotationStyle,
+  RuleSetMode,
+} from '../types/logic';
 import { TopicId, UOC_TOPICS } from '../data/topics';
 import { TopicSelector } from './TopicSelector';
 import { sound } from '../utils/audio';
 import { MascotOwl } from './MascotOwl';
+import {
+  expandFormulaSnippets,
+  formatRuleName,
+  detectMainConnective,
+} from '../utils/logicNotation';
+import { validateStepSemantics, SemanticValidationResult } from '../utils/fitchValidator';
 
 const STORAGE_FREE_KEY = 'deducolog_freemode_saves_v1';
 
@@ -33,6 +48,11 @@ interface FreePracticeModeProps {
   selectedTopicId: TopicId;
   onSelectTopic: (topicId: TopicId) => void;
   exercises?: FreeExercise[];
+  notationStyle?: NotationStyle;
+  onToggleNotation?: () => void;
+  ruleSetMode?: RuleSetMode;
+  onToggleRuleSet?: () => void;
+  onOpenCheatSheet?: () => void;
 }
 
 export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
@@ -41,6 +61,11 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
   selectedTopicId,
   onSelectTopic,
   exercises = HUNDRED_EXERCISES,
+  notationStyle = 'symbol',
+  onToggleNotation,
+  ruleSetMode = 'complete',
+  onToggleRuleSet,
+  onOpenCheatSheet,
 }) => {
   const activeExercises = exercises && exercises.length > 0 ? exercises : HUNDRED_EXERCISES;
   const currentTopic = UOC_TOPICS.find((t) => t.id === selectedTopicId) || UOC_TOPICS[1];
@@ -80,6 +105,7 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
       rule: 'Premisa',
       referencedLines: [],
       depth: 0,
+      isClosedBlock: false,
     }));
   });
 
@@ -93,15 +119,18 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
 
   // Inputs
   const [inputFormula, setInputFormula] = useState('');
-  const [selectedRule, setSelectedRule] = useState(LOGIC_RULES[0].uocNotation);
+  const [selectedRule, setSelectedRule] = useState(LOGIC_RULES[0].uocSymbol);
   const [selectedLines, setSelectedLines] = useState<number[]>([]);
-  const [stepError, setStepError] = useState<string | null>(null);
+  const [semanticError, setSemanticError] = useState<SemanticValidationResult | null>(null);
 
-  // Progressive help
-  const [hintIndex, setHintIndex] = useState(0);
+  // Socratic 3-Level hints
+  const [socraticLevel, setSocraticLevel] = useState<number>(1);
   const [logiAdvice, setLogiAdvice] = useState<string>(
     currentEx.hints[0] || 'Empieza analizando las premisas y la meta final.'
   );
+
+  // Backward & Forward connective detection
+  const goalAnalysis = detectMainConnective(currentEx.goal);
 
   // When selected exercise changes
   const handleSelectExercise = (ex: FreeExercise) => {
@@ -112,7 +141,7 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
     if (existing && existing.steps?.length > 0) {
       setSteps(existing.steps);
       setCurrentDepth(existing.currentDepth ?? 0);
-      setIsCompleted(existing.isCompleted || completedIds.includes(ex.id));
+      setIsCompleted(existing.isCompleted);
     } else {
       setSteps(
         ex.premises.map((p, idx) => ({
@@ -122,20 +151,21 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
           rule: 'Premisa',
           referencedLines: [],
           depth: 0,
+          isClosedBlock: false,
         }))
       );
       setCurrentDepth(0);
-      setIsCompleted(completedIds.includes(ex.id));
+      setIsCompleted(false);
     }
 
     setInputFormula('');
     setSelectedLines([]);
-    setStepError(null);
-    setHintIndex(0);
-    setLogiAdvice(ex.hints[0] || 'Empieza analizando las premisas y la meta final.');
+    setSemanticError(null);
+    setSocraticLevel(1);
+    setLogiAdvice(ex.hints[0] || 'Analiza el conector principal de la meta.');
   };
 
-  // Persistent save
+  // Persist state
   useEffect(() => {
     const updated: ExerciseSavedState = {
       exerciseId: currentEx.id,
@@ -154,9 +184,9 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
     });
   }, [steps, isCompleted, currentDepth, currentEx.id]);
 
-  const handleInsertKey = (key: string) => {
+  const handleInsertKey = (val: string) => {
     sound.playClick();
-    setInputFormula((prev) => prev + key);
+    setInputFormula((prev) => expandFormulaSnippets(prev + val));
   };
 
   const handleBackspace = () => {
@@ -164,22 +194,20 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
     setInputFormula((prev) => prev.slice(0, -1));
   };
 
-  const handleToggleLine = (lineNum: number) => {
-    sound.playClick();
-    setSelectedLines((prev) =>
-      prev.includes(lineNum) ? prev.filter((l) => l !== lineNum) : [...prev, lineNum].sort((a, b) => a - b)
-    );
-  };
-
   const handleOpenHypothesis = () => {
     if (!inputFormula.trim()) {
-      setStepError('Escribe la fórmula que vas a suponer como hipótesis.');
       sound.playError();
+      setSemanticError({
+        isValid: false,
+        errorType: 'empty_formula',
+        title: 'Fórmula de supuesto vacía',
+        explanation: 'Escribe la fórmula que deseas suponer temporalmente (ej: p).',
+      });
       return;
     }
 
     sound.playClick();
-    setStepError(null);
+    setSemanticError(null);
     const nextLineNum = steps.length + 1;
     const nextDepth = currentDepth + 1;
 
@@ -187,10 +215,11 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
       id: `step_${Date.now()}`,
       lineNum: nextLineNum,
       formula: inputFormula.trim(),
-      rule: 'Hipótesis',
+      rule: 'Supuesto',
       referencedLines: [],
       depth: nextDepth,
       isHypothesis: true,
+      isClosedBlock: false,
     };
 
     setSteps([...steps, newStep]);
@@ -202,34 +231,77 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
 
   const handleAddStep = () => {
     if (!inputFormula.trim()) {
-      setStepError('Escribe la fórmula resultante antes de aplicar la regla.');
       sound.playError();
+      setSemanticError({
+        isValid: false,
+        errorType: 'empty_formula',
+        title: 'Fórmula vacía',
+        explanation: 'Escribe la fórmula resultante antes de aplicar la regla.',
+      });
+      return;
+    }
+
+    // Run semantic & scope validation
+    const validation = validateStepSemantics(
+      steps,
+      inputFormula,
+      selectedRule,
+      selectedLines,
+      currentEx.premises,
+      currentEx.goal
+    );
+
+    if (!validation.isValid) {
+      sound.playError();
+      setSemanticError(validation);
+      setLogiAdvice(`⚠️ ${validation.title}: ${validation.explanation}`);
       return;
     }
 
     sound.playClick();
-    setStepError(null);
+    setSemanticError(null);
     const nextLineNum = steps.length + 1;
 
     const isClosing =
       selectedRule.includes('I→') ||
+      selectedRule.includes('II') ||
       selectedRule.includes('I¬') ||
+      selectedRule.includes('IN') ||
       selectedRule.includes('E∨') ||
+      selectedRule.includes('ED') ||
       selectedRule.includes('RAA');
 
     const nextDepth = isClosing ? Math.max(0, currentDepth - 1) : currentDepth;
+
+    // Lock closed subderivation
+    let updatedPrevSteps = [...steps];
+    if (isClosing) {
+      let lastHypoIdx = -1;
+      for (let i = updatedPrevSteps.length - 1; i >= 0; i--) {
+        if (updatedPrevSteps[i].isHypothesis && !updatedPrevSteps[i].isClosedBlock) {
+          lastHypoIdx = i;
+          break;
+        }
+      }
+      if (lastHypoIdx !== -1) {
+        for (let i = lastHypoIdx; i < updatedPrevSteps.length; i++) {
+          updatedPrevSteps[i] = { ...updatedPrevSteps[i], isClosedBlock: true };
+        }
+      }
+    }
 
     const newStep: ProofStep = {
       id: `step_${Date.now()}`,
       lineNum: nextLineNum,
       formula: inputFormula.trim(),
-      rule: selectedRule,
+      rule: formatRuleName(selectedRule, notationStyle, ruleSetMode === 'complete'),
       referencedLines: selectedLines,
       depth: nextDepth,
       closesHypothesis: isClosing,
+      isClosedBlock: false,
     };
 
-    const nextSteps = [...steps, newStep];
+    const nextSteps = [...updatedPrevSteps, newStep];
     setSteps(nextSteps);
     setCurrentDepth(nextDepth);
     setInputFormula('');
@@ -244,7 +316,7 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
       setIsCompleted(true);
       confetti({ particleCount: 80, spread: 60, origin: { y: 0.6 } });
       onExerciseCompleted(currentEx.id);
-      setLogiAdvice('¡FANTÁSTICO! Demostración completada paso a paso como en papel de examen.');
+      setLogiAdvice('¡FANTÁSTICO! Demostración completada paso a paso como en papel de examen de la UOC.');
     } else {
       sound.playSuccess();
       setLogiAdvice('Paso formal añadido. Continúa hacia la meta.');
@@ -259,6 +331,7 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
     const prevDepth = prevSteps.length > 0 ? prevSteps[prevSteps.length - 1].depth : 0;
     setCurrentDepth(prevDepth);
     setIsCompleted(false);
+    setSemanticError(null);
     setLogiAdvice('Paso deshecho. Vuelve a intentarlo.');
   };
 
@@ -272,44 +345,41 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
         rule: 'Premisa',
         referencedLines: [],
         depth: 0,
+        isClosedBlock: false,
       }))
     );
     setCurrentDepth(0);
     setIsCompleted(false);
-    setInputFormula('');
-    setSelectedLines([]);
-    setStepError(null);
-    setHintIndex(0);
-    setLogiAdvice(currentEx.hints[0] || 'Deducción reiniciada.');
+    setSemanticError(null);
+    setSocraticLevel(1);
+    setLogiAdvice('Ejercicio reiniciado.');
   };
 
-  // Step-by-step help button
-  const handleRequestHint = () => {
+  const handleRequestSocraticHint = () => {
     sound.playClick();
-    const hints = currentEx.hints;
-    if (hints.length === 0) return;
-    const current = hints[hintIndex % hints.length];
-    setLogiAdvice(`💡 Pista (${(hintIndex % hints.length) + 1}/${hints.length}): ${current}`);
-    setHintIndex((prev) => prev + 1);
-  };
-
-  // Auto-fill next step if completely stuck
-  const handleSolveNextStep = () => {
-    sound.playClick();
-    const userStepIdx = steps.length - currentEx.premises.length;
-    if (userStepIdx < currentEx.solutionSteps.length) {
-      const nextSol = currentEx.solutionSteps[userStepIdx];
-      setInputFormula(nextSol.formula);
-      setSelectedRule(nextSol.rule);
-      setSelectedLines(nextSol.referencedLines);
-      setLogiAdvice(`✨ Ayuda paso a paso: ${nextSol.explanation}. ¡Pulsa "Aplicar" para registrarlo!`);
+    if (socraticLevel === 1) {
+      setLogiAdvice(`💡 Pista Nivel 1 (Estrategia): Tu meta es ${currentEx.goal}. ${goalAnalysis.advice}`);
+      setSocraticLevel(2);
+    } else if (socraticLevel === 2) {
+      setLogiAdvice(
+        `🔍 Pista Nivel 2 (Foco): Revisa las premisas disponibles y busca si puedes descomponer una conjunción (E∧ / EC) o si necesitas suponer el antecedente con I→ (II).`
+      );
+      setSocraticLevel(3);
     } else {
-      setLogiAdvice('¡Ya tienes todos los pasos necesarios! Revisa tu última línea.');
+      const solutionStep = currentEx.solutionSteps[steps.length - currentEx.premises.length];
+      if (solutionStep) {
+        const ruleName = formatRuleName(solutionStep.rule, notationStyle, ruleSetMode === 'complete');
+        setLogiAdvice(
+          `⚡ Pista Nivel 3 (Regla Concreta): Aplica ${ruleName} sobre las líneas [${solutionStep.referencedLines.join(', ')}] para avanzar.`
+        );
+      } else {
+        setLogiAdvice(currentEx.hints[0] || 'Concéntrate en la meta final.');
+      }
+      setSocraticLevel(1);
     }
   };
 
-  // Filter list of 105 exercises
-  const filteredExercises = HUNDRED_EXERCISES.filter((ex) => {
+  const filteredExercises = activeExercises.filter((ex) => {
     const matchCat = selectedCategory === 'Todas' || ex.category === selectedCategory;
     const matchDiff = selectedDifficulty === 'todos' || ex.difficulty === selectedDifficulty;
     const matchQuery =
@@ -325,7 +395,7 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
   ).length;
 
   return (
-    <div className="max-w-6xl mx-auto px-3 sm:px-6 py-6 pb-28 md:pb-12">
+    <div className="max-w-6xl mx-auto px-3 sm:px-6 py-6 pb-28 md:pb-12 space-y-6">
       {/* Topic Selector Dropdown directly above the intro */}
       <TopicSelector
         selectedTopicId={selectedTopicId}
@@ -333,9 +403,9 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
       />
 
       {/* Top Banner */}
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 sm:p-7 shadow-xs mb-6 flex flex-col md:flex-row md:items-center justify-between gap-5 transition-colors">
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 sm:p-7 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-5 transition-colors">
         <div>
-          <div className="flex items-center gap-2 text-xs font-bold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-3 py-1 rounded-full w-fit mb-2 border border-emerald-500/20">
+          <div className="flex items-center gap-2 text-xs font-bold text-indigo-700 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 px-3 py-1 rounded-full w-fit mb-2 border border-indigo-500/20">
             <BookOpen className="w-3.5 h-3.5" />
             <span>Colección {currentTopic.code} · {activeExercises.length} Ejercicios Prácticos</span>
           </div>
@@ -343,7 +413,8 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
             Modo Libre: {currentTopic.title}
           </h1>
           <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 mt-1 max-w-xl leading-relaxed">
-            {currentTopic.description} Resuelve paso a paso con el teclado integrado adaptado a este tema y pide ayuda con pistas en cualquier momento.
+            {currentTopic.description} Resuelve paso a paso con el teclado integrado adaptado a este tema,
+            cajas de Fitch con sangrado jerárquico y pistas socráticas en 3 niveles.
           </p>
         </div>
 
@@ -353,18 +424,60 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
             <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 block">
               Ejercicios Superados
             </span>
-            <span className="text-xl font-bold font-mono text-emerald-600 dark:text-emerald-400">
+            <span className="text-xl font-bold font-mono text-indigo-600 dark:text-indigo-400">
               {totalCompleted} / {activeExercises.length}
             </span>
           </div>
-          <div className="w-11 h-11 rounded-full bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300 flex items-center justify-center font-bold">
+          <div className="w-11 h-11 rounded-full bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 flex items-center justify-center font-bold">
             <Check className="w-5 h-5 stroke-[2.5]" />
           </div>
         </div>
       </div>
 
+      {/* PEDAGOGIC PANEL: "🎯 Sub-meta Actual (Fabricar vs Romper)" */}
+      <div className="bg-gradient-to-r from-indigo-500/10 via-purple-500/10 to-emerald-500/10 border border-indigo-200 dark:border-indigo-900/60 rounded-3xl p-4 sm:p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="flex items-start gap-3">
+          <div className="w-10 h-10 rounded-2xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+            <Compass className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 mb-0.5">
+              <span className="font-extrabold text-xs uppercase tracking-wider text-indigo-600 dark:text-indigo-400">
+                Estrategia Pedagógica UOC
+              </span>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-950 font-mono font-bold text-indigo-700 dark:text-indigo-300">
+                Conectivo: {goalAnalysis.connective.toUpperCase()}
+              </span>
+            </div>
+            <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed max-w-2xl">
+              {goalAnalysis.advice}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleRequestSocraticHint}
+            className="px-4 py-2.5 rounded-2xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-extrabold text-xs transition-all flex items-center gap-2 shrink-0 cursor-pointer shadow-xs"
+          >
+            <Lightbulb className="w-4 h-4" />
+            <span>Pedir Pista ({socraticLevel}/3)</span>
+          </button>
+
+          {onOpenCheatSheet && (
+            <button
+              onClick={onOpenCheatSheet}
+              className="p-2.5 rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-indigo-300 text-slate-700 dark:text-slate-300 transition-colors cursor-pointer"
+              title="Abrir Chuleta Lateral"
+            >
+              <BookOpen className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Catalog Selector Strip with Search & Categories */}
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 sm:p-5 shadow-xs mb-6 space-y-3">
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 sm:p-5 shadow-xs space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           {/* Search bar */}
           <div className="relative flex-1">
@@ -373,8 +486,8 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Buscar entre los 105 ejercicios (ej: Modus Ponens, #42, De Morgan...)"
-              className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl pl-9 pr-4 py-2 text-xs text-slate-900 dark:text-slate-100 placeholder-slate-400 outline-none focus:ring-2 focus:ring-emerald-500"
+              placeholder={`Buscar entre los ${activeExercises.length} ejercicios (ej: Modus Ponens, #42, De Morgan...)`}
+              className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl pl-9 pr-4 py-2 text-xs text-slate-900 dark:text-slate-100 placeholder-slate-400 outline-none focus:ring-2 focus:ring-indigo-500"
             />
           </div>
 
@@ -385,10 +498,10 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
                 <button
                   key={cat}
                   onClick={() => setSelectedCategory(cat)}
-                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors cursor-pointer ${
+                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${
                     selectedCategory === cat
-                      ? 'bg-emerald-600 text-white shadow-2xs'
-                      : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+                      ? 'bg-indigo-600 text-white shadow-2xs'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200'
                   }`}
                 >
                   {cat}
@@ -398,8 +511,8 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
           </div>
         </div>
 
-        {/* Horizontal Quick-Select Carousel of Numbers */}
-        <div className="flex items-center gap-2 overflow-x-auto pb-1 pt-1">
+        {/* Carousel of exercise cards */}
+        <div className="flex items-center gap-2 overflow-x-auto pb-2 pt-1">
           {filteredExercises.map((ex) => {
             const isSelected = ex.id === currentEx.id;
             const isDone = savedProofs[ex.id]?.isCompleted || completedIds.includes(ex.id);
@@ -431,7 +544,7 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
         <div className="lg:col-span-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-xs overflow-hidden transition-colors">
           <div className="bg-slate-900 dark:bg-slate-950 text-white px-5 py-3.5 flex items-center justify-between border-b border-slate-800">
             <div>
-              <div className="text-[11px] font-semibold text-emerald-400 flex items-center gap-1.5">
+              <div className="text-[11px] font-semibold text-indigo-400 flex items-center gap-1.5">
                 <span>Ejercicio #{currentEx.number}</span>
                 <span>·</span>
                 <span>{currentEx.category}</span>
@@ -447,14 +560,14 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
                 onClick={handleUndo}
                 disabled={steps.length <= currentEx.premises.length}
                 title="Deshacer último paso"
-                className="min-h-[40px] min-w-[40px] p-2 text-slate-400 hover:text-white rounded-xl hover:bg-slate-800 transition-colors disabled:opacity-30 flex items-center justify-center cursor-pointer"
+                className="p-2 text-slate-400 hover:text-white rounded-xl hover:bg-slate-800 transition-colors disabled:opacity-30 flex items-center justify-center cursor-pointer"
               >
                 <Undo2 className="w-4 h-4" />
               </button>
               <button
                 onClick={handleReset}
                 title="Reiniciar ejercicio"
-                className="min-h-[40px] min-w-[40px] p-2 text-slate-400 hover:text-white rounded-xl hover:bg-slate-800 transition-colors flex items-center justify-center cursor-pointer"
+                className="p-2 text-slate-400 hover:text-white rounded-xl hover:bg-slate-800 transition-colors flex items-center justify-center cursor-pointer"
               >
                 <RotateCcw className="w-4 h-4" />
               </button>
@@ -466,45 +579,53 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
             <span className="text-slate-600 dark:text-slate-300">
               Premisas: <strong>{currentEx.premises.length > 0 ? currentEx.premises.join(', ') : 'Ninguna (Teorema)'}</strong>
             </span>
-            <span className="text-emerald-700 dark:text-emerald-400 font-bold bg-emerald-100/60 dark:bg-emerald-950/80 px-2.5 py-1 rounded-lg border border-emerald-300 dark:border-emerald-800">
+            <span className="text-indigo-600 dark:text-indigo-400 font-bold bg-indigo-50 dark:bg-indigo-950/80 px-2.5 py-1 rounded-lg border border-indigo-200 dark:border-indigo-800">
               ⊢ Meta: {currentEx.goal}
             </span>
           </div>
 
           {/* Table Header */}
-          <div className="px-4 py-2 border-b border-slate-100 dark:border-slate-800 text-[11px] font-semibold text-slate-400 flex items-center justify-between">
+          <div className="bg-slate-100/70 dark:bg-slate-800/80 px-4 py-2 text-[11px] font-semibold text-slate-500 dark:text-slate-400 flex items-center justify-between border-b border-slate-200 dark:border-slate-800 font-mono">
             <span className="w-8">Línea</span>
-            <span className="flex-1 px-3">Fórmula Derivada (Cajas Fitch)</span>
+            <span className="flex-1 px-3">Fórmula (Cajas Fitch)</span>
             <span className="text-right">Regla</span>
           </div>
 
-          {/* Fitch Proof Lines */}
-          <div className="p-3 sm:p-4 space-y-1.5 max-h-[420px] overflow-y-auto font-mono text-sm">
-            {steps.map((step) => {
-              const isSelected = selectedLines.includes(step.lineNum);
+          {/* Fitch Table Body */}
+          <div className="p-3 sm:p-4 space-y-1 max-h-[460px] overflow-y-auto font-mono text-sm">
+            {steps.map((step, idx) => {
+              const isPremise = step.rule === 'Premisa';
+              const isLast = idx === steps.length - 1 && !isPremise;
+              const isLocked = !!step.isClosedBlock;
+
               return (
                 <div
                   key={step.id}
-                  onClick={() => handleToggleLine(step.lineNum)}
-                  className={`flex items-center justify-between py-2 px-3 rounded-xl cursor-pointer transition-all ${
-                    isSelected
-                      ? 'bg-emerald-50 dark:bg-emerald-950/80 border border-emerald-300 dark:border-emerald-600 text-emerald-950 dark:text-emerald-200 font-bold'
-                      : 'hover:bg-slate-50 dark:hover:bg-slate-800/60 text-slate-800 dark:text-slate-200'
+                  className={`flex items-center justify-between py-2 px-3 rounded-xl transition-all ${
+                    isLast
+                      ? 'bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 text-indigo-950 dark:text-indigo-100 font-bold'
+                      : isPremise
+                      ? 'bg-slate-50 dark:bg-slate-800/40 text-slate-700 dark:text-slate-300'
+                      : isLocked
+                      ? 'opacity-60 bg-slate-100/60 dark:bg-slate-800/30 text-slate-500'
+                      : 'text-slate-900 dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-800/50'
                   }`}
                 >
                   <div className="flex items-center gap-3">
                     <span className="text-slate-400 text-xs w-6 tabular-nums">{step.lineNum}.</span>
 
-                    {/* Colored Depth Indentations */}
+                    {/* Fitch Indentation Lines */}
                     <div className="flex items-center">
                       {Array.from({ length: step.depth }).map((_, i) => (
                         <div
                           key={i}
                           className={`w-3.5 h-7 border-l-2 -ml-1 mr-2 ${
-                            i === 0
+                            isLocked
+                              ? 'border-slate-300 dark:border-slate-700'
+                              : i === 0
                               ? 'border-amber-500'
                               : i === 1
-                              ? 'border-blue-500'
+                              ? 'border-indigo-500'
                               : 'border-rose-500'
                           }`}
                         />
@@ -512,7 +633,9 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
                       <span
                         className={`${
                           step.isHypothesis
-                            ? 'text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/60 px-2 py-0.5 rounded border border-amber-300 dark:border-amber-700 italic font-semibold'
+                            ? 'text-amber-900 dark:text-amber-200 bg-amber-100 dark:bg-amber-950/80 px-2 py-0.5 rounded border border-amber-300 dark:border-amber-700 italic font-semibold'
+                            : step.formula === currentEx.goal && step.depth === 0
+                            ? 'text-emerald-600 dark:text-emerald-400 font-extrabold'
                             : 'font-semibold'
                         }`}
                       >
@@ -521,36 +644,43 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
                     </div>
                   </div>
 
-                  <div className="text-right text-xs text-slate-500 dark:text-slate-400 font-sans">
-                    {step.rule}
-                    {step.referencedLines.length > 0 ? ` ${step.referencedLines.join(', ')}` : ''}
+                  <div className="flex items-center gap-2 text-right text-xs">
+                    {isLocked && (
+                      <span title="Línea dentro de una caja de supuesto ya cerrada (inaccesible)">
+                        <Lock className="w-3.5 h-3.5 text-slate-400" />
+                      </span>
+                    )}
+                    <span className="text-slate-500 dark:text-slate-400 font-sans">
+                      {step.rule}
+                      {step.referencedLines.length > 0 ? ` ${step.referencedLines.join(', ')}` : ''}
+                    </span>
                   </div>
                 </div>
               );
             })}
           </div>
 
-          <div className="bg-slate-50 dark:bg-slate-800/60 px-4 py-2 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-            <span>Líneas marcadas: {selectedLines.length > 0 ? selectedLines.join(', ') : 'Ninguna'}</span>
-            <span>Cajas abiertas: {currentDepth}</span>
+          <div className="bg-slate-50 dark:bg-slate-800/60 px-4 py-2 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs text-slate-500 font-mono">
+            <span>Profundidad cajas: {currentDepth}</span>
+            <span>Total líneas: {steps.length}</span>
           </div>
         </div>
 
-        {/* Right: Integrated Keypad & Help Deck (6 cols) */}
+        {/* Right: Step Editor & Keyboard */}
         <div className="lg:col-span-6 space-y-4">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 shadow-xs transition-colors">
-            <div className="flex items-center justify-between mb-3">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 shadow-xs space-y-3.5">
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2.5">
               <span className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
-                <Keyboard className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-                <span>Teclado Lógico y de Letras</span>
+                <Keyboard className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                <span>Teclado Lógico y Editor UOC</span>
               </span>
-              <span className="text-xs font-mono text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950 px-2 py-0.5 rounded border border-emerald-200 dark:border-emerald-800 font-bold">
+              <span className="text-xs font-mono text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950 px-2 py-0.5 rounded font-bold">
                 Línea {steps.length + 1}
               </span>
             </div>
 
             {/* In-App Keyboard: Logic Signs */}
-            <div className="mb-2">
+            <div>
               <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">
                 Símbolos y Operadores ({currentTopic.code}):
               </span>
@@ -559,7 +689,7 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
                   <button
                     key={sym}
                     onClick={() => handleInsertKey(sym)}
-                    className="min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 active:bg-emerald-200 text-slate-900 dark:text-slate-100 font-bold text-base transition-colors flex items-center justify-center border border-slate-200 dark:border-slate-700 cursor-pointer shadow-2xs"
+                    className="min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 active:bg-indigo-200 text-slate-900 dark:text-slate-100 font-bold text-base transition-colors flex items-center justify-center border border-slate-200 dark:border-slate-700 cursor-pointer shadow-2xs"
                   >
                     {sym}
                   </button>
@@ -568,7 +698,7 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
             </div>
 
             {/* In-App Keyboard: Letters */}
-            <div className="mb-3">
+            <div>
               <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">
                 Variables y Constantes:
               </span>
@@ -577,130 +707,164 @@ export const FreePracticeMode: React.FC<FreePracticeModeProps> = ({
                   <button
                     key={letter}
                     onClick={() => handleInsertKey(letter)}
-                    className="min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 active:bg-emerald-200 text-slate-900 dark:text-slate-100 font-bold text-sm transition-colors flex items-center justify-center border border-slate-200 dark:border-slate-700 cursor-pointer shadow-2xs"
+                    className="min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 active:bg-indigo-200 text-slate-900 dark:text-slate-100 font-bold text-sm transition-colors flex items-center justify-center border border-slate-200 dark:border-slate-700 cursor-pointer shadow-2xs"
                   >
                     {letter}
                   </button>
                 ))}
                 <button
                   onClick={handleBackspace}
-                  className="min-h-[44px] rounded-xl bg-rose-50 dark:bg-rose-950/60 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-300 font-bold text-xs transition-colors flex items-center justify-center border border-rose-200 dark:border-rose-800 cursor-pointer col-span-2 sm:col-span-1"
+                  className="min-h-[44px] rounded-xl bg-rose-50 dark:bg-rose-950/60 hover:bg-rose-100 text-rose-700 dark:text-rose-300 font-bold text-xs transition-colors flex items-center justify-center border border-rose-200 dark:border-rose-800 cursor-pointer col-span-2 sm:col-span-1"
                 >
                   DEL
                 </button>
               </div>
             </div>
 
-            {/* Formula Input Box */}
-            <div className="mb-3">
-              <label htmlFor="free-formula" className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 block mb-1">
-                Fórmula de esta línea:
+            {/* Formula Input Box with live snippets */}
+            <div>
+              <label htmlFor="free-formula" className="text-[11px] font-semibold text-slate-500 block mb-1">
+                {"Fórmula de esta línea (autocompleta '->' a '→', '&' a '∧', etc.):"}
               </label>
               <input
                 id="free-formula"
                 type="text"
                 value={inputFormula}
-                onChange={(e) => setInputFormula(e.target.value)}
+                onChange={(e) => setInputFormula(expandFormulaSnippets(e.target.value))}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleAddStep();
+                }}
                 placeholder="Escribe o toca las teclas (ej: p ∧ q)"
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-3.5 py-2.5 font-mono text-sm text-slate-900 dark:text-slate-100 focus:bg-white dark:focus:bg-slate-900 focus:ring-2 focus:ring-emerald-500 outline-none"
+                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-3.5 py-2.5 font-mono text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none"
               />
             </div>
 
             {/* Rule Selector */}
-            <div className="mb-4">
-              <label htmlFor="free-rule" className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 block mb-1">
-                Regla de Inferencia:
+            <div>
+              <label htmlFor="free-rule" className="text-[11px] font-semibold text-slate-500 block mb-1">
+                Regla de Inferencia UOC:
               </label>
               <select
                 id="free-rule"
                 value={selectedRule}
                 onChange={(e) => setSelectedRule(e.target.value)}
-                className="w-full bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200 text-xs font-semibold rounded-xl px-3 py-2.5 shadow-2xs outline-none focus:ring-2 focus:ring-emerald-500"
+                className="w-full bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200 text-xs font-semibold rounded-xl px-3 py-2.5 shadow-2xs outline-none"
               >
-                {LOGIC_RULES.map((rule) => (
-                  <option key={rule.id} value={rule.uocNotation}>
-                    {rule.uocNotation} - {rule.name}
-                  </option>
-                ))}
+                {LOGIC_RULES.filter((r) => ruleSetMode === 'complete' || !r.isDerived).map((rule) => {
+                  const label =
+                    notationStyle === 'symbol'
+                      ? `${rule.uocSymbol} - ${rule.name}`
+                      : `${rule.uocAcronym} - ${rule.name}`;
+                  return (
+                    <option key={rule.id} value={rule.uocSymbol}>
+                      {label}
+                    </option>
+                  );
+                })}
               </select>
             </div>
 
-            {stepError && (
-              <div className="mb-3 p-3 bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-800 rounded-xl text-xs text-rose-700 dark:text-rose-300">
-                {stepError}
+            {/* Line Selection */}
+            <div>
+              <span className="text-[11px] font-semibold text-slate-500 block mb-1">
+                Líneas citadas:
+              </span>
+              <div className="flex flex-wrap gap-1.5 font-mono text-xs">
+                {steps.map((s) => {
+                  const isChecked = selectedLines.includes(s.lineNum);
+                  const isLocked = !!s.isClosedBlock;
+                  return (
+                    <button
+                      key={s.lineNum}
+                      disabled={isLocked}
+                      onClick={() => {
+                        setSelectedLines((prev) =>
+                          prev.includes(s.lineNum)
+                            ? prev.filter((x) => x !== s.lineNum)
+                            : [...prev, s.lineNum]
+                        );
+                      }}
+                      className={`min-h-[36px] px-2.5 rounded-lg border font-bold transition-all flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed ${
+                        isLocked
+                          ? 'opacity-40 bg-slate-100 dark:bg-slate-800 text-slate-400 border-slate-200'
+                          : isChecked
+                          ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
+                          : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-700'
+                      }`}
+                      title={isLocked ? 'Caja cerrada inaccesible' : s.formula}
+                    >
+                      <span>{s.lineNum}</span>
+                      {isLocked && <Lock className="w-3 h-3 text-slate-400" />}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Semantic Error Panel */}
+            {semanticError && (
+              <div className="p-3.5 bg-rose-50 dark:bg-rose-950/70 border border-rose-300 dark:border-rose-800 rounded-2xl text-xs text-rose-900 dark:text-rose-100 space-y-1">
+                <div className="flex items-center gap-2 font-bold">
+                  <ShieldAlert className="w-4 h-4 text-rose-600" />
+                  <span>{semanticError.title || 'Error en el paso'}</span>
+                </div>
+                <p className="leading-relaxed">{semanticError.explanation}</p>
+                {semanticError.pedagogicHint && (
+                  <p className="font-semibold text-rose-950 dark:text-rose-200 mt-1">
+                    💡 {semanticError.pedagogicHint}
+                  </p>
+                )}
               </div>
             )}
 
             {/* Action Buttons */}
-            <div className="flex gap-2">
+            <div className="flex gap-2 pt-1">
               <button
                 onClick={handleAddStep}
-                className="flex-1 min-h-[44px] py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white text-xs font-bold rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                className="flex-1 min-h-[44px] py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white text-xs font-bold rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
               >
                 <Plus className="w-4 h-4" />
-                <span>Aplicar Regla</span>
+                <span>Aplicar Regla (Enter)</span>
               </button>
               <button
                 onClick={handleOpenHypothesis}
-                title="Abre una caja de subderivación temporal"
-                className="min-h-[44px] py-2.5 px-3.5 bg-amber-50 dark:bg-amber-950/60 hover:bg-amber-100 dark:hover:bg-amber-900 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700 text-xs font-bold rounded-xl transition-colors whitespace-nowrap cursor-pointer"
+                className="min-h-[44px] py-2.5 px-3.5 bg-amber-50 dark:bg-amber-950/60 hover:bg-amber-100 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700 text-xs font-bold rounded-xl transition-colors cursor-pointer"
               >
-                [ Abrir Hipótesis ]
+                [ Abrir Supuesto ]
               </button>
             </div>
           </div>
 
-          {/* Help Buttons Deck (Ayuda en cada paso) */}
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleRequestHint}
-              className="flex-1 min-h-[44px] px-3.5 py-2.5 rounded-2xl bg-amber-50 dark:bg-amber-950/60 hover:bg-amber-100 dark:hover:bg-amber-900 border border-amber-200 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs font-bold transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
-            >
-              <HelpCircle className="w-4 h-4 text-amber-600 dark:text-amber-400" />
-              <span>Pedir Pista de este paso</span>
-            </button>
-            <button
-              onClick={handleSolveNextStep}
-              className="flex-1 min-h-[44px] px-3.5 py-2.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/60 hover:bg-emerald-100 dark:hover:bg-emerald-900 border border-emerald-200 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200 text-xs font-bold transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
-            >
-              <Sparkles className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-              <span>Resolver este paso</span>
-            </button>
-          </div>
-
-          {/* Mascot Live Advice */}
-          <div className="bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 rounded-3xl p-4 sm:p-5 transition-colors">
-            <MascotOwl
-              mood={isCompleted ? 'graduate' : 'thinking'}
-              className="w-14 h-14 mb-2"
-              speechText={logiAdvice}
-            />
+          {/* Socratic Logi Advice Box */}
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 sm:p-5 flex items-start gap-3">
+            <MascotOwl mood="thinking" className="w-10 h-10 shrink-0 hidden sm:block" />
+            <div className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed flex-1">
+              {logiAdvice}
+            </div>
           </div>
 
           {/* Completion Celebration Card */}
           {isCompleted && (
-            <div className="bg-gradient-to-br from-emerald-600 via-teal-700 to-slate-900 text-white rounded-3xl p-6 text-center shadow-lg animate-in zoom-in-95 duration-200">
-              <div className="w-12 h-12 rounded-full bg-white text-emerald-800 flex items-center justify-center mx-auto mb-3 font-extrabold text-xl shadow-md">
+            <div className="bg-gradient-to-br from-indigo-600 via-indigo-700 to-slate-900 text-white rounded-3xl p-6 text-center shadow-lg animate-in zoom-in-95 duration-200">
+              <div className="w-12 h-12 rounded-full bg-white text-indigo-700 flex items-center justify-center mx-auto mb-3 font-extrabold text-xl shadow-md">
                 ✓
               </div>
               <h3 className="text-lg font-extrabold mb-1">¡Ejercicio #{currentEx.number} Completado!</h3>
-              <p className="text-xs sm:text-sm text-emerald-100 mb-5 leading-relaxed max-w-md mx-auto">
-                Has derivado formalmente <strong>{currentEx.goal}</strong> con el rigor de la UOC. Tu progreso en la colección de 105 ejercicios ha aumentado.
+              <p className="text-xs sm:text-sm text-indigo-100 mb-5 leading-relaxed max-w-md mx-auto">
+                Has derivado formalmente <strong>{currentEx.goal}</strong> con el rigor y notación de la UOC.
               </p>
 
-              <div className="flex flex-wrap items-center justify-center gap-3">
-                <button
-                  onClick={() => {
-                    const nextIdx =
-                      (HUNDRED_EXERCISES.findIndex((e) => e.id === currentEx.id) + 1) %
-                      HUNDRED_EXERCISES.length;
-                    handleSelectExercise(HUNDRED_EXERCISES[nextIdx]);
-                  }}
-                  className="min-h-[44px] px-6 py-2.5 bg-white text-slate-950 font-bold rounded-xl text-xs sm:text-sm shadow-md hover:bg-emerald-50 transition-colors cursor-pointer"
-                >
-                  Siguiente Ejercicio (#{currentEx.number + 1})
-                </button>
-              </div>
+              <button
+                onClick={() => {
+                  const nextIdx =
+                    (activeExercises.findIndex((e) => e.id === currentEx.id) + 1) %
+                    activeExercises.length;
+                  handleSelectExercise(activeExercises[nextIdx]);
+                }}
+                className="px-6 py-2.5 bg-white text-slate-950 font-bold rounded-xl text-xs sm:text-sm shadow-md hover:bg-indigo-50 transition-colors cursor-pointer"
+              >
+                Siguiente Ejercicio (#{currentEx.number + 1})
+              </button>
             </div>
           )}
         </div>

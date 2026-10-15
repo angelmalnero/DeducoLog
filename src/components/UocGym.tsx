@@ -20,14 +20,33 @@ import {
   MousePointerClick,
   Info,
   Lightbulb,
+  Lock,
+  Compass,
+  ShieldAlert,
+  ShieldCheck,
+  Eye,
 } from 'lucide-react';
 import { UOC_EXAM_EXERCISES } from '../data/uocExams';
 import { LOGIC_RULES } from '../data/rules';
-import { GymExercise, ProofStep, ExerciseSavedState, StepChoice } from '../types/logic';
+import {
+  GymExercise,
+  ProofStep,
+  ExerciseSavedState,
+  StepChoice,
+  NotationStyle,
+  RuleSetMode,
+} from '../types/logic';
 import { TopicId, UOC_TOPICS } from '../data/topics';
 import { TopicSelector } from './TopicSelector';
 import { sound } from '../utils/audio';
 import { MascotOwl } from './MascotOwl';
+import {
+  expandFormulaSnippets,
+  formatRuleName,
+  areRulesEquivalent,
+  detectMainConnective,
+} from '../utils/logicNotation';
+import { validateStepSemantics, SemanticValidationResult } from '../utils/fitchValidator';
 
 const STORAGE_GYM_KEY = 'deducolog_uoc_gym_saves_v2';
 
@@ -35,14 +54,26 @@ interface UocGymProps {
   selectedTopicId: TopicId;
   onSelectTopic: (topicId: TopicId) => void;
   exercises?: GymExercise[];
+  notationStyle?: NotationStyle;
+  onToggleNotation?: () => void;
+  ruleSetMode?: RuleSetMode;
+  onToggleRuleSet?: () => void;
+  onOpenCheatSheet?: () => void;
 }
 
 export const UocGym: React.FC<UocGymProps> = ({
   selectedTopicId,
   onSelectTopic,
   exercises = UOC_EXAM_EXERCISES,
+  notationStyle = 'symbol',
+  onToggleNotation,
+  ruleSetMode = 'complete',
+  onToggleRuleSet,
+  onOpenCheatSheet,
 }) => {
   const currentTopic = UOC_TOPICS.find((t) => t.id === selectedTopicId) || UOC_TOPICS[1];
+  const activeList = exercises.length > 0 ? exercises : UOC_EXAM_EXERCISES;
+
   // Load saved progress for all exercises
   const [savedExercises, setSavedExercises] = useState<Record<string, ExerciseSavedState>>(() => {
     try {
@@ -54,10 +85,9 @@ export const UocGym: React.FC<UocGymProps> = ({
     return {};
   });
 
-  const activeList = exercises.length > 0 ? exercises : UOC_EXAM_EXERCISES;
   const [selectedExerciseId, setSelectedExerciseId] = useState<string>(activeList[0].id);
   const [filterDifficulty, setFilterDifficulty] = useState<string>('todos');
-  const [inputMode, setInputMode] = useState<'cards' | 'manual'>('cards'); // Default to Alura-style card mode!
+  const [inputMode, setInputMode] = useState<'cards' | 'manual'>('cards'); // Default to Alura-style card mode
   const [lastFeedback, setLastFeedback] = useState<{ isCorrect: boolean; text: string } | null>(null);
 
   // When exercises change due to topic switch, reset selectedExerciseId if needed
@@ -83,6 +113,7 @@ export const UocGym: React.FC<UocGymProps> = ({
       rule: 'Premisa',
       referencedLines: [],
       depth: 0,
+      isClosedBlock: false,
     }));
   });
 
@@ -97,12 +128,12 @@ export const UocGym: React.FC<UocGymProps> = ({
 
   // Manual input state (if student toggles manual mode)
   const [manualFormula, setManualFormula] = useState('');
-  const [manualRule, setManualRule] = useState(LOGIC_RULES[0].uocNotation);
+  const [manualRule, setManualRule] = useState(LOGIC_RULES[0].uocSymbol);
   const [manualSelectedLines, setManualSelectedLines] = useState<number[]>([]);
-  const [stepError, setStepError] = useState<string | null>(null);
+  const [semanticError, setSemanticError] = useState<SemanticValidationResult | null>(null);
 
-  // Progressive hints
-  const [hintIndex, setHintIndex] = useState(0);
+  // Socratic hints state (Levels 1, 2, 3)
+  const [socraticLevel, setSocraticLevel] = useState<number>(1);
   const [logiSpeech, setLogiSpeech] = useState<string>(currentExercise.strategyOverview);
 
   // Sync state when selected exercise changes
@@ -124,6 +155,7 @@ export const UocGym: React.FC<UocGymProps> = ({
           rule: 'Premisa',
           referencedLines: [],
           depth: 0,
+          isClosedBlock: false,
         }))
       );
       setCurrentDepth(0);
@@ -132,9 +164,9 @@ export const UocGym: React.FC<UocGymProps> = ({
 
     setManualFormula('');
     setManualSelectedLines([]);
-    setStepError(null);
+    setSemanticError(null);
     setLastFeedback(null);
-    setHintIndex(0);
+    setSocraticLevel(1);
     setLogiSpeech(ex.strategyOverview);
   };
 
@@ -163,18 +195,26 @@ export const UocGym: React.FC<UocGymProps> = ({
   const currentSolutionIndex = steps.length - currentExercise.premises.length;
   const targetSolutionStep = currentExercise.solutionSteps[currentSolutionIndex];
 
-  // Generate 3 to 4 smart Alura-style step cards for the current state
+  // Backward & Forward Reasoning connective detection
+  const goalConnectiveAnalysis = detectMainConnective(currentExercise.goal);
+
+  // Generate smart step choices (Alura mode)
   const generateStepChoices = (): StepChoice[] => {
     if (!targetSolutionStep || isCompleted) return [];
 
-    // The correct step
+    const displayRuleName = formatRuleName(
+      targetSolutionStep.rule,
+      notationStyle,
+      ruleSetMode === 'complete'
+    );
+
     const correctChoice: StepChoice = {
       id: 'choice_correct',
       label: targetSolutionStep.isHypothesis
-        ? `Abrir caja de hipótesis con "${targetSolutionStep.formula}"`
+        ? `[Supuesto] Abrir caja con "${targetSolutionStep.formula}"`
         : targetSolutionStep.closesHypothesis
-        ? `Cerrar caja y concluir "${targetSolutionStep.formula}" (${targetSolutionStep.rule})`
-        : `Deducir "${targetSolutionStep.formula}" usando ${targetSolutionStep.rule} en ${targetSolutionStep.referencedLines.join(', ')}`,
+        ? `[Cerrar Caja] Concluir "${targetSolutionStep.formula}" (${displayRuleName})`
+        : `Deducir "${targetSolutionStep.formula}" aplicando ${displayRuleName}`,
       formula: targetSolutionStep.formula,
       rule: targetSolutionStep.rule,
       referencedLines: targetSolutionStep.referencedLines,
@@ -184,81 +224,23 @@ export const UocGym: React.FC<UocGymProps> = ({
       explanation: targetSolutionStep.explanation,
     };
 
-    // Plausible distractors (typical UOC student mistakes)
+    // Distractors tailored to UOC common traps
     const distractors: StepChoice[] = [];
-
-    if (targetSolutionStep.isHypothesis) {
+    if (targetSolutionStep.closesHypothesis) {
       distractors.push({
         id: 'distractor_1',
-        label: `Intentar deducir directamente "${currentExercise.goal}" sin abrir hipótesis`,
-        formula: currentExercise.goal,
-        rule: 'Directo',
-        referencedLines: [1],
-        isCorrect: false,
-        explanation: `¡Ojo! La meta "${currentExercise.goal}" requiere demostrar un condicional o negación. El método formal de la UOC exige abrir una subderivación temporal.`,
-      });
-      distractors.push({
-        id: 'distractor_2',
-        label: `Abrir hipótesis con la conclusión en vez del antecedente`,
-        formula: currentExercise.goal,
-        rule: 'Hipótesis',
-        referencedLines: [],
-        isCorrect: false,
-        explanation: 'En el Teorema de Deducción (I→) debes suponer el antecedente (el lado izquierdo de la flecha), no la conclusión final.',
-      });
-    } else if (targetSolutionStep.rule.includes('E∧')) {
-      distractors.push({
-        id: 'distractor_1',
-        label: `Aplicar Modus Ponens (E→) directamente sobre la conjunción`,
-        formula: 'q',
-        rule: 'E→',
-        referencedLines: [1, 2],
-        isCorrect: false,
-        explanation: 'Las premisas unidas con "∧" no son condicionales (→). Primero debes desempaquetar la conjunción con E∧.',
-      });
-      distractors.push({
-        id: 'distractor_2',
-        label: `Unir premisas con I∧ sin haber aislado sus componentes`,
-        formula: 'p ∧ r',
-        rule: 'I∧',
-        referencedLines: [1],
-        isCorrect: false,
-        explanation: 'No puedes inventar una unión sin tener ambas fórmulas ya demostradas en líneas previas independientes.',
-      });
-    } else if (targetSolutionStep.rule.includes('E→')) {
-      distractors.push({
-        id: 'distractor_1',
-        label: `Aplicar Modus Tollens (MT) en vez de Modus Ponens`,
-        formula: `¬${targetSolutionStep.formula}`,
-        rule: 'MT',
-        referencedLines: targetSolutionStep.referencedLines,
-        isCorrect: false,
-        explanation: 'Modus Tollens requiere que el consecuente esté negado (¬B). Aquí tienes el antecedente positivo libre, por lo que la regla correcta es Modus Ponens (E→).',
-      });
-      distractors.push({
-        id: 'distractor_2',
-        label: `Aplicar Doble Negación (E¬¬)`,
-        formula: targetSolutionStep.formula,
-        rule: 'E¬¬',
-        referencedLines: [1],
-        isCorrect: false,
-        explanation: 'Ninguna de las fórmulas activas tiene dos signos de negación seguidos (¬¬).',
-      });
-    } else if (targetSolutionStep.closesHypothesis) {
-      distractors.push({
-        id: 'distractor_1',
-        label: `Cerrar la caja usando E∧ en vez de ${targetSolutionStep.rule}`,
+        label: `Cerrar caja citando regla de eliminación (E∧)`,
         formula: targetSolutionStep.formula,
         rule: 'E∧',
         referencedLines: targetSolutionStep.referencedLines,
         isCorrect: false,
-        explanation: `Para cerrar una subderivación se usa una regla de Introducción (${targetSolutionStep.rule}), que es la que formaliza la descarga de la hipótesis.`,
+        explanation: `Para cerrar una subderivación se usa una regla de Introducción (${displayRuleName}), que es la que formaliza la descarga de la hipótesis.`,
       });
       distractors.push({
         id: 'distractor_2',
-        label: `Abrir otra caja de hipótesis innecesaria`,
+        label: `Abrir otra caja de supuesto innecesaria`,
         formula: '⊥',
-        rule: 'Hipótesis',
+        rule: 'Supuesto',
         referencedLines: [],
         isCorrect: false,
         explanation: 'Ya has alcanzado la meta dentro de esta caja. ¡Es el momento de cerrarla y cosechar el teorema!',
@@ -266,16 +248,15 @@ export const UocGym: React.FC<UocGymProps> = ({
     } else {
       distractors.push({
         id: 'distractor_1',
-        label: `Aplicar Silogismo Disyuntivo (SD)`,
+        label: `Aplicar Silogismo Disyuntivo (SD) sin negar disyunto`,
         formula: 'q',
         rule: 'SD',
         referencedLines: [1],
         isCorrect: false,
-        explanation: 'Para aplicar SD necesitas una disyunción (∨) y la negación de uno de sus miembros.',
+        explanation: 'Para aplicar SD necesitas una disyunción (∨) y la negación estricta de uno de sus miembros.',
       });
     }
 
-    // Combine and shuffle choices deterministically for this step
     const all = [correctChoice, ...distractors].slice(0, 3);
     return all.sort((a, b) => a.label.localeCompare(b.label));
   };
@@ -294,18 +275,37 @@ export const UocGym: React.FC<UocGymProps> = ({
         ? Math.max(0, currentDepth - 1)
         : currentDepth;
 
+      // Si se cierra un supuesto, marcamos las líneas dentro de esa caja como inaccesibles (isClosedBlock)
+      let updatedPrevSteps = [...steps];
+      if (closes) {
+        // Encontrar la hipótesis más reciente al nivel actual y marcar las líneas intermedias
+        let lastHypoIdx = -1;
+        for (let i = updatedPrevSteps.length - 1; i >= 0; i--) {
+          if (updatedPrevSteps[i].isHypothesis && !updatedPrevSteps[i].isClosedBlock) {
+            lastHypoIdx = i;
+            break;
+          }
+        }
+        if (lastHypoIdx !== -1) {
+          for (let i = lastHypoIdx; i < updatedPrevSteps.length; i++) {
+            updatedPrevSteps[i] = { ...updatedPrevSteps[i], isClosedBlock: true };
+          }
+        }
+      }
+
       const newStep: ProofStep = {
         id: `step_${Date.now()}`,
         lineNum: nextLineNum,
         formula: choice.formula,
-        rule: choice.rule,
+        rule: formatRuleName(choice.rule, notationStyle, ruleSetMode === 'complete'),
         referencedLines: choice.referencedLines,
         depth: newDepth,
         isHypothesis: opens,
         closesHypothesis: closes,
+        isClosedBlock: false,
       };
 
-      const updatedSteps = [...steps, newStep];
+      const updatedSteps = [...updatedPrevSteps, newStep];
       setSteps(updatedSteps);
       setCurrentDepth(newDepth);
 
@@ -315,34 +315,30 @@ export const UocGym: React.FC<UocGymProps> = ({
         sound.playLevelComplete();
         setIsCompleted(true);
         confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
-        setLogiSpeech('¡Q.E.D.! Demostración completa con máxima nota. ¡Eres una máquina de la deducción!');
+        setLogiSpeech('¡Q.E.D.! Demostración completa con máxima nota UOC. ¡Eres una máquina de la deducción!');
       } else {
-        setLogiSpeech(`¡Muy bien! ${choice.explanation}`);
+        setLogiSpeech(`¡Correcto! ${choice.explanation}`);
       }
     } else {
       sound.playError();
       setLastFeedback({ isCorrect: false, text: choice.explanation });
-      setLogiSpeech(`Logi te aconseja: ${choice.explanation}`);
+      setLogiSpeech(`Atención: ${choice.explanation}`);
     }
   };
 
-  // Undo last step
   const handleUndoStep = () => {
     if (steps.length <= currentExercise.premises.length) return;
     sound.playClick();
-    const lastStep = steps[steps.length - 1];
     const prevSteps = steps.slice(0, -1);
+    const lastStep = prevSteps[prevSteps.length - 1];
     setSteps(prevSteps);
-
-    // Calculate previous depth
-    const prevDepth = prevSteps.length > 0 ? prevSteps[prevSteps.length - 1].depth : 0;
-    setCurrentDepth(prevDepth);
+    setCurrentDepth(lastStep?.depth ?? 0);
     setIsCompleted(false);
     setLastFeedback(null);
-    setLogiSpeech('Paso deshecho. Vuelve a intentarlo.');
+    setSemanticError(null);
+    setLogiSpeech('Paso deshecho. Puedes intentar otra vía.');
   };
 
-  // Reset exercise
   const handleReset = () => {
     sound.playClick();
     setSteps(
@@ -353,30 +349,175 @@ export const UocGym: React.FC<UocGymProps> = ({
         rule: 'Premisa',
         referencedLines: [],
         depth: 0,
+        isClosedBlock: false,
       }))
     );
     setCurrentDepth(0);
     setIsCompleted(false);
     setLastFeedback(null);
-    setHintIndex(0);
+    setSemanticError(null);
+    setSocraticLevel(1);
     setLogiSpeech(currentExercise.strategyOverview);
   };
 
-  // Hint provider
-  const handleRequestHint = () => {
+  // 3-Level Socratic Hint Request Handler
+  const handleRequestSocraticHint = () => {
     sound.playClick();
-    const hints = currentExercise.hints;
-    if (hints.length === 0) return;
-    const hint = hints[hintIndex % hints.length];
-    setLogiSpeech(`💡 Pista (${(hintIndex % hints.length) + 1}/${hints.length}): ${hint}`);
-    setHintIndex((prev) => prev + 1);
+
+    if (socraticLevel === 1) {
+      // Level 1: Estrategia Fabricar vs Romper
+      const text =
+        targetSolutionStep?.socraticHints?.level1Strategy ||
+        `🎯 Nivel 1 (Estrategia): Tu meta es ${currentExercise.goal}. ${goalConnectiveAnalysis.advice}`;
+      setLogiSpeech(`💡 Pista Nivel 1: ${text}`);
+      setSocraticLevel(2);
+    } else if (socraticLevel === 2) {
+      // Level 2: Foco en líneas clave
+      const refs = targetSolutionStep?.referencedLines || [1];
+      const text =
+        targetSolutionStep?.socraticHints?.level2Focus ||
+        `🔍 Nivel 2 (Foco): Fíjate en las líneas [${refs.join(', ')}]. ¿Qué conector tienen y cómo puedes combinarlo o extraer su información?`;
+      setLogiSpeech(`💡 Pista Nivel 2: ${text}`);
+      setSocraticLevel(3);
+    } else {
+      // Level 3: Regla concreta
+      const ruleName = formatRuleName(
+        targetSolutionStep?.rule || 'I→',
+        notationStyle,
+        ruleSetMode === 'complete'
+      );
+      const refs = targetSolutionStep?.referencedLines || [];
+      const text =
+        targetSolutionStep?.socraticHints?.level3Concrete ||
+        `⚡ Nivel 3 (Regla Concreta): Aplica ${ruleName} sobre las líneas [${refs.join(', ')}] para obtener el siguiente paso.`;
+      setLogiSpeech(`💡 Pista Nivel 3: ${text}`);
+      setSocraticLevel(1); // loop back
+    }
+  };
+
+  // Manual step validation and submission
+  const handleApplyManualStep = () => {
+    if (!manualFormula.trim()) {
+      sound.playError();
+      setSemanticError({
+        isValid: false,
+        errorType: 'empty_formula',
+        title: 'Fórmula vacía',
+        explanation: 'Por favor, escribe la fórmula formal que deduces en esta línea.',
+      });
+      return;
+    }
+
+    // Semantic and Scope validation
+    const validation = validateStepSemantics(
+      steps,
+      manualFormula,
+      manualRule,
+      manualSelectedLines,
+      currentExercise.premises,
+      currentExercise.goal
+    );
+
+    if (!validation.isValid) {
+      sound.playError();
+      setSemanticError(validation);
+      setLogiSpeech(`⚠️ ${validation.title}: ${validation.explanation}`);
+      return;
+    }
+
+    // Check against target step or match equivalent rules
+    sound.playSuccess();
+    setSemanticError(null);
+
+    const isClosing =
+      manualRule.includes('I→') ||
+      manualRule.includes('II') ||
+      manualRule.includes('I¬') ||
+      manualRule.includes('IN') ||
+      manualRule.includes('E∨') ||
+      manualRule.includes('ED') ||
+      manualRule.includes('RAA');
+
+    const nextDepth = isClosing ? Math.max(0, currentDepth - 1) : currentDepth;
+
+    let updatedPrevSteps = [...steps];
+    if (isClosing) {
+      let lastHypoIdx = -1;
+      for (let i = updatedPrevSteps.length - 1; i >= 0; i--) {
+        if (updatedPrevSteps[i].isHypothesis && !updatedPrevSteps[i].isClosedBlock) {
+          lastHypoIdx = i;
+          break;
+        }
+      }
+      if (lastHypoIdx !== -1) {
+        for (let i = lastHypoIdx; i < updatedPrevSteps.length; i++) {
+          updatedPrevSteps[i] = { ...updatedPrevSteps[i], isClosedBlock: true };
+        }
+      }
+    }
+
+    const newStep: ProofStep = {
+      id: `step_${Date.now()}`,
+      lineNum: steps.length + 1,
+      formula: manualFormula.trim(),
+      rule: formatRuleName(manualRule, notationStyle, ruleSetMode === 'complete'),
+      referencedLines: manualSelectedLines,
+      depth: nextDepth,
+      closesHypothesis: isClosing,
+      isClosedBlock: false,
+    };
+
+    const nextSteps = [...updatedPrevSteps, newStep];
+    setSteps(nextSteps);
+    setCurrentDepth(nextDepth);
+    setManualFormula('');
+    setManualSelectedLines([]);
+
+    if (manualFormula.trim() === currentExercise.goal.trim() && nextDepth === 0) {
+      sound.playLevelComplete();
+      setIsCompleted(true);
+      confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
+      setLogiSpeech('¡DEMOSTRACIÓN COMPLETADA! Has alcanzado la meta con éxito.');
+    } else {
+      setLogiSpeech('Paso formal añadido. Continúa deduciendo hacia la meta.');
+    }
+  };
+
+  const handleOpenManualHypothesis = () => {
+    if (!manualFormula.trim()) {
+      sound.playError();
+      setSemanticError({
+        isValid: false,
+        errorType: 'empty_formula',
+        title: 'Fórmula de supuesto vacía',
+        explanation: 'Escribe la fórmula que deseas suponer (ej: p para demostrar p → q).',
+      });
+      return;
+    }
+
+    sound.playClick();
+    setSemanticError(null);
+    const newStep: ProofStep = {
+      id: `step_${Date.now()}`,
+      lineNum: steps.length + 1,
+      formula: manualFormula.trim(),
+      rule: 'Supuesto',
+      referencedLines: [],
+      depth: currentDepth + 1,
+      isHypothesis: true,
+      isClosedBlock: false,
+    };
+
+    setSteps([...steps, newStep]);
+    setCurrentDepth(currentDepth + 1);
+    setManualFormula('');
+    setLogiSpeech(`Supuesto abierto: [${manualFormula.trim()}]. Ahora deduce hasta la sub-meta para poder cerrarlo.`);
   };
 
   const filteredExercises = activeList.filter((ex) => {
     return filterDifficulty === 'todos' || ex.difficulty === filterDifficulty;
   });
 
-  const completedCount = Object.values(savedExercises).filter((s) => s.isCompleted).length;
   const progressPercent = Math.min(
     100,
     Math.round((currentSolutionIndex / currentExercise.solutionSteps.length) * 100)
@@ -385,91 +526,138 @@ export const UocGym: React.FC<UocGymProps> = ({
   const stepChoices = generateStepChoices();
 
   return (
-    <div className="max-w-6xl mx-auto px-3 sm:px-6 py-6 pb-28 md:pb-12">
+    <div className="max-w-6xl mx-auto px-3 sm:px-6 py-6 pb-28 md:pb-12 space-y-6">
       {/* Topic Selector Dropdown directly above the gym interface */}
       <TopicSelector
         selectedTopicId={selectedTopicId}
         onSelectTopic={onSelectTopic}
       />
 
-      {/* Alura-style Top Navigation & Progress */}
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 sm:p-6 shadow-xs mb-6 transition-colors">
+      {/* Main Gym Navigation & Config Bar */}
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 sm:p-6 shadow-xs transition-colors">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 dark:border-slate-800 pb-4 mb-4">
           <div>
             <div className="flex items-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1">
               <span>Gimnasio Práctico UOC</span>
               <span>·</span>
-              <span className="text-emerald-700 dark:text-emerald-400 font-bold">{currentExercise.uocExamOrigin}</span>
+              <span className="text-indigo-600 dark:text-indigo-400 font-bold">{currentExercise.uocExamOrigin}</span>
               <span>·</span>
               <span className="capitalize">{currentExercise.difficulty}</span>
             </div>
             <h1 className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white tracking-tight flex items-center gap-2">
               <span>{currentExercise.title}</span>
               {isCompleted && (
-                <span className="text-xs font-bold text-emerald-800 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-950/80 px-2.5 py-0.5 rounded-full flex items-center gap-1">
-                  <Check className="w-3.5 h-3.5 stroke-[3]" /> ¡Completado!
+                <span className="text-xs font-bold text-emerald-800 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-950/80 px-2.5 py-0.5 rounded-full flex items-center gap-1 border border-emerald-300 dark:border-emerald-800">
+                  <Check className="w-3.5 h-3.5 stroke-[3]" /> ¡Demostrado!
                 </span>
               )}
             </h1>
           </div>
 
-          {/* Mode switch (Alura Cards vs Manual Keyboard) */}
-          <div className="flex items-center gap-2">
+          {/* Quick Controls: Input Mode & Cheat Sheet Drawer */}
+          <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => {
                 sound.playClick();
                 setInputMode(inputMode === 'cards' ? 'manual' : 'cards');
               }}
-              className="min-h-[44px] px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-colors flex items-center gap-2 cursor-pointer"
+              className="min-h-[40px] px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-bold transition-all flex items-center gap-2 cursor-pointer border border-slate-200 dark:border-slate-700"
             >
               {inputMode === 'cards' ? (
                 <>
-                  <MousePointerClick className="w-4 h-4 text-emerald-600" />
-                  <span>Modo Toca y Deduce (Recomendado)</span>
+                  <MousePointerClick className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                  <span>Modo Toca y Deduce</span>
                 </>
               ) : (
                 <>
-                  <Keyboard className="w-4 h-4 text-blue-600" />
+                  <Keyboard className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
                   <span>Modo Teclado Libre</span>
                 </>
               )}
             </button>
+
+            {onOpenCheatSheet && (
+              <button
+                onClick={() => {
+                  sound.playClick();
+                  onOpenCheatSheet();
+                }}
+                className="min-h-[40px] px-3 py-2 rounded-xl bg-indigo-50 dark:bg-indigo-950/70 hover:bg-indigo-100 dark:hover:bg-indigo-900 text-indigo-700 dark:text-indigo-300 text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer border border-indigo-200 dark:border-indigo-800"
+                title="Abrir Chuleta Lateral"
+              >
+                <BookOpen className="w-4 h-4" />
+                <span>Chuleta</span>
+              </button>
+            )}
           </div>
         </div>
 
-        {/* Goal Strip & Progress Bar */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex flex-wrap items-center gap-2 sm:gap-4 text-xs sm:text-sm">
-            <div className="font-mono bg-slate-100 px-3 py-1.5 rounded-xl border border-slate-200 text-slate-700">
-              Premisas: <strong className="text-slate-900">{currentExercise.premises.join(', ')}</strong>
+        {/* Progress Bar & Goal */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+          <div className="flex-1">
+            <div className="flex justify-between font-semibold mb-1 text-slate-600 dark:text-slate-400">
+              <span>Progreso de la demostración</span>
+              <span>{progressPercent}%</span>
             </div>
-            <div className="font-mono bg-emerald-50 px-3 py-1.5 rounded-xl border border-emerald-200 text-emerald-900 font-bold flex items-center gap-1.5">
-              <span>⊢ Meta:</span>
-              <span className="text-emerald-700 underline decoration-emerald-500 underline-offset-4">
-                {currentExercise.goal}
-              </span>
-            </div>
-          </div>
-
-          {/* Step Progress Pill */}
-          <div className="flex items-center gap-3">
-            <span className="text-xs font-bold text-slate-500 font-mono">
-              Paso {Math.min(currentSolutionIndex, currentExercise.solutionSteps.length)} de{' '}
-              {currentExercise.solutionSteps.length}
-            </span>
-            <div className="w-28 sm:w-36 bg-slate-100 h-2.5 rounded-full overflow-hidden border border-slate-200">
+            <div className="w-full bg-slate-100 dark:bg-slate-800 h-2.5 rounded-full overflow-hidden">
               <div
-                className="bg-emerald-500 h-full rounded-full transition-all duration-300"
+                className="bg-indigo-600 h-full rounded-full transition-all duration-300"
                 style={{ width: `${progressPercent}%` }}
               />
             </div>
           </div>
+
+          <div className="bg-slate-50 dark:bg-slate-800/80 px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 font-mono text-xs shrink-0 flex items-center gap-2">
+            <span className="text-slate-400">Meta:</span>
+            <span className="font-extrabold text-indigo-600 dark:text-indigo-400">
+              ⊢ {currentExercise.goal}
+            </span>
+          </div>
         </div>
       </div>
 
-      {/* Exercise Carousel Pill Strip */}
-      <div className="mb-6 overflow-x-auto pb-2 flex items-center gap-2">
-        {UOC_EXAM_EXERCISES.map((ex, idx) => {
+      {/* PEDAGOGIC PANEL: "🎯 Sub-meta Actual (Fabricar vs Romper)" */}
+      <div className="bg-gradient-to-r from-indigo-500/10 via-purple-500/10 to-emerald-500/10 border border-indigo-200 dark:border-indigo-900/60 rounded-3xl p-4 sm:p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="flex items-start gap-3">
+          <div className="w-10 h-10 rounded-2xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+            <Compass className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 mb-0.5">
+              <span className="font-extrabold text-xs uppercase tracking-wider text-indigo-600 dark:text-indigo-400">
+                Estrategia Pedagógica UOC
+              </span>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-950 font-mono font-bold text-indigo-700 dark:text-indigo-300">
+                Conectivo: {goalConnectiveAnalysis.connective.toUpperCase()}
+              </span>
+            </div>
+            <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed max-w-2xl">
+              {goalConnectiveAnalysis.advice}
+            </p>
+          </div>
+        </div>
+
+        {/* Socratic Hint 3-Level Button */}
+        <button
+          onClick={handleRequestSocraticHint}
+          className="px-4 py-2.5 rounded-2xl bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-slate-950 font-extrabold text-xs transition-all flex items-center justify-center gap-2 shrink-0 cursor-pointer shadow-xs"
+        >
+          <Lightbulb className="w-4 h-4" />
+          <span>Pedir Pista (Nivel {socraticLevel}/3)</span>
+        </button>
+      </div>
+
+      {/* Mascot Speech Bubble with Socratic Guidance */}
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 sm:p-5 flex items-start gap-4">
+        <MascotOwl mood="thinking" className="w-12 h-12 shrink-0 hidden sm:block" />
+        <div className="text-xs sm:text-sm text-slate-700 dark:text-slate-300 leading-relaxed flex-1">
+          {logiSpeech}
+        </div>
+      </div>
+
+      {/* Exercise Pill Carousel */}
+      <div className="overflow-x-auto pb-2 flex items-center gap-2">
+        {activeList.map((ex, idx) => {
           const isSelected = ex.id === currentExercise.id;
           const isExDone = savedExercises[ex.id]?.isCompleted;
           return (
@@ -478,15 +666,15 @@ export const UocGym: React.FC<UocGymProps> = ({
               onClick={() => handleSelectExercise(ex)}
               className={`min-h-[44px] px-3.5 py-2 rounded-2xl text-xs font-semibold whitespace-nowrap transition-all flex items-center gap-2 border cursor-pointer ${
                 isSelected
-                  ? 'bg-slate-900 text-white border-slate-900 shadow-sm'
-                  : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300'
+                  ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 border-slate-900 shadow-sm'
+                  : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:border-slate-300'
               }`}
             >
-              <span className="w-5 h-5 rounded-full bg-slate-200/40 text-[11px] font-mono flex items-center justify-center">
+              <span className="w-5 h-5 rounded-full bg-slate-200/50 dark:bg-slate-800 text-[11px] font-mono flex items-center justify-center">
                 {idx + 1}
               </span>
               <span>{ex.title}</span>
-              {isExDone && <Check className="w-3.5 h-3.5 text-emerald-400 stroke-[3]" />}
+              {isExDone && <Check className="w-3.5 h-3.5 text-emerald-500 stroke-[3]" />}
             </button>
           );
         })}
@@ -495,25 +683,25 @@ export const UocGym: React.FC<UocGymProps> = ({
       {/* Main Two-Zone Workstation */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Left: Interactive Fitch Proof Table (6 cols) */}
-        <div className="lg:col-span-6 bg-white border border-slate-200 rounded-3xl shadow-xs overflow-hidden">
+        <div className="lg:col-span-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-xs overflow-hidden">
           <div className="bg-slate-900 text-white px-5 py-3.5 flex items-center justify-between border-b border-slate-800">
             <div className="flex items-center gap-2 font-bold text-xs uppercase tracking-wider text-slate-300">
-              <BookOpen className="w-4 h-4 text-emerald-400" />
+              <BookOpen className="w-4 h-4 text-indigo-400" />
               <span>Demostración Formal de Fitch (UOC)</span>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
               <button
                 onClick={handleUndoStep}
                 disabled={steps.length <= currentExercise.premises.length}
                 title="Deshacer último paso"
-                className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors disabled:opacity-30 cursor-pointer"
+                className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors disabled:opacity-30 cursor-pointer"
               >
                 <Undo2 className="w-4 h-4" />
               </button>
               <button
                 onClick={handleReset}
                 title="Reiniciar ejercicio"
-                className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
+                className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
               >
                 <RotateCcw className="w-4 h-4" />
               </button>
@@ -521,27 +709,30 @@ export const UocGym: React.FC<UocGymProps> = ({
           </div>
 
           {/* Table Header */}
-          <div className="bg-slate-50 px-4 py-2 border-b border-slate-200 text-[11px] font-semibold text-slate-500 flex items-center justify-between">
+          <div className="bg-slate-50 dark:bg-slate-800/60 px-4 py-2 border-b border-slate-200 dark:border-slate-800 text-[11px] font-semibold text-slate-500 dark:text-slate-400 flex items-center justify-between font-mono">
             <span className="w-8">Línea</span>
             <span className="flex-1 px-3">Fórmula Derivada (Cajas)</span>
-            <span className="text-right">Regla & Cita</span>
+            <span className="text-right">Regla UOC</span>
           </div>
 
-          {/* Fitch Lines Container */}
-          <div className="p-3 sm:p-4 space-y-1.5 max-h-[460px] overflow-y-auto font-mono text-sm">
+          {/* Fitch Lines Container with Scope Locks */}
+          <div className="p-3 sm:p-4 space-y-1.5 max-h-[500px] overflow-y-auto font-mono text-sm">
             {steps.map((step, idx) => {
               const isPremise = step.rule === 'Premisa';
               const isRecent = idx === steps.length - 1 && !isPremise;
+              const isClosed = !!step.isClosedBlock;
 
               return (
                 <div
                   key={step.id}
                   className={`flex items-center justify-between py-2 px-3 rounded-xl transition-all ${
                     isRecent
-                      ? 'bg-emerald-50 border border-emerald-300 text-emerald-950 font-bold'
+                      ? 'bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-300 dark:border-emerald-700 text-emerald-950 dark:text-emerald-100 font-bold'
                       : isPremise
-                      ? 'bg-slate-50 text-slate-700'
-                      : 'text-slate-900 hover:bg-slate-50/80'
+                      ? 'bg-slate-50 dark:bg-slate-800/40 text-slate-700 dark:text-slate-300'
+                      : isClosed
+                      ? 'opacity-60 bg-slate-100/60 dark:bg-slate-800/30 text-slate-500 line-through-none'
+                      : 'text-slate-900 dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-800/40'
                   }`}
                 >
                   <div className="flex items-center gap-3">
@@ -553,10 +744,12 @@ export const UocGym: React.FC<UocGymProps> = ({
                         <div
                           key={i}
                           className={`w-3.5 h-7 border-l-2 -ml-1 mr-2 ${
-                            i === 0
+                            isClosed
+                              ? 'border-slate-300 dark:border-slate-700'
+                              : i === 0
                               ? 'border-amber-500'
                               : i === 1
-                              ? 'border-blue-500'
+                              ? 'border-indigo-500'
                               : 'border-rose-500'
                           }`}
                         />
@@ -564,9 +757,9 @@ export const UocGym: React.FC<UocGymProps> = ({
                       <span
                         className={`${
                           step.isHypothesis
-                            ? 'text-amber-900 bg-amber-100/70 px-2 py-0.5 rounded border border-amber-300 italic font-semibold'
+                            ? 'text-amber-900 dark:text-amber-200 bg-amber-100 dark:bg-amber-950/80 px-2 py-0.5 rounded border border-amber-300 dark:border-amber-700 italic font-semibold'
                             : step.formula === currentExercise.goal && step.depth === 0
-                            ? 'text-emerald-700 font-extrabold'
+                            ? 'text-emerald-600 dark:text-emerald-400 font-extrabold'
                             : 'font-semibold'
                         }`}
                       >
@@ -575,8 +768,13 @@ export const UocGym: React.FC<UocGymProps> = ({
                     </div>
                   </div>
 
-                  <div className="text-right text-xs">
-                    <span className="text-slate-500 font-sans">
+                  <div className="flex items-center gap-2 text-right text-xs">
+                    {isClosed && (
+                      <span title="Línea dentro de una caja de supuesto ya cerrada (inaccesible)">
+                        <Lock className="w-3.5 h-3.5 text-slate-400" />
+                      </span>
+                    )}
+                    <span className="text-slate-500 dark:text-slate-400 font-sans">
                       {step.rule}
                       {step.referencedLines.length > 0 ? ` ${step.referencedLines.join(', ')}` : ''}
                     </span>
@@ -586,66 +784,59 @@ export const UocGym: React.FC<UocGymProps> = ({
             })}
           </div>
 
-          <div className="bg-slate-50 px-4 py-2.5 border-t border-slate-200 flex items-center justify-between text-xs text-slate-500">
-            <span>Cajas de hipótesis abiertas: {currentDepth}</span>
-            <span>Líneas totales: {steps.length}</span>
+          <div className="bg-slate-50 dark:bg-slate-800/60 px-4 py-2.5 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs text-slate-500 font-mono">
+            <span>Cajas abiertas: {currentDepth}</span>
+            <span>Total líneas: {steps.length}</span>
           </div>
         </div>
 
-        {/* Right: Alura-style Action Deck & Tutor Feedback (6 cols) */}
+        {/* Right: Actions Deck (Cards or Manual with Live Snippets) */}
         <div className="lg:col-span-6 space-y-4">
           {/* Card-Based Smart Action Selector (Alura Mode) */}
           {inputMode === 'cards' && !isCompleted && (
-            <div className="bg-white border border-slate-200 rounded-3xl p-5 shadow-xs">
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                  Tu Turno: ¿Qué paso aplicas a continuación?
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 shadow-xs space-y-3">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
+                  <Zap className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                  <span>Elige el siguiente paso formal:</span>
                 </span>
-                <button
-                  onClick={handleRequestHint}
-                  className="text-xs font-semibold text-amber-700 hover:text-amber-800 flex items-center gap-1 cursor-pointer"
-                >
-                  <Lightbulb className="w-3.5 h-3.5 text-amber-600" />
-                  <span>Pedir Pista</span>
-                </button>
+                <span className="text-xs font-mono text-indigo-600 dark:text-indigo-400 font-bold bg-indigo-50 dark:bg-indigo-950 px-2 py-0.5 rounded">
+                  Línea {steps.length + 1}
+                </span>
               </div>
 
-              {/* 3 Interactive Alura-style Deduction Cards */}
               <div className="space-y-2.5">
                 {stepChoices.map((choice) => (
                   <button
                     key={choice.id}
                     onClick={() => handleSelectCardChoice(choice)}
-                    className="w-full text-left p-3.5 sm:p-4 rounded-2xl border border-slate-200 hover:border-emerald-500 hover:bg-emerald-50/40 active:bg-emerald-100/60 transition-all duration-150 flex items-start justify-between gap-3 group cursor-pointer shadow-2xs"
+                    className="w-full text-left p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 hover:bg-indigo-50/70 dark:hover:bg-indigo-950/70 active:scale-[0.99] border border-slate-200 dark:border-slate-700 hover:border-indigo-300 dark:hover:border-indigo-700 transition-all cursor-pointer group shadow-2xs"
                   >
-                    <div className="space-y-1">
-                      <div className="font-semibold text-slate-900 text-xs sm:text-sm group-hover:text-emerald-950">
-                        {choice.label}
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="font-bold text-xs sm:text-sm text-slate-800 dark:text-slate-200 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
+                          {choice.label}
+                        </div>
+                        <div className="font-mono text-xs text-slate-500 dark:text-slate-400 mt-1">
+                          Resultado: <span className="font-bold text-indigo-600 dark:text-indigo-400">{choice.formula}</span>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2 text-[11px] font-mono text-slate-500">
-                        <span>Fórmula:</span>
-                        <span className="font-bold text-emerald-700 bg-emerald-100/60 px-1.5 py-0.5 rounded">
-                          {choice.formula}
-                        </span>
-                        <span>·</span>
-                        <span>Regla: {choice.rule}</span>
-                      </div>
+                      <ChevronRight className="w-5 h-5 text-slate-400 group-hover:text-indigo-600 group-hover:translate-x-0.5 transition-all shrink-0 mt-1" />
                     </div>
-                    <ChevronRight className="w-5 h-5 text-slate-400 group-hover:text-emerald-600 shrink-0 mt-1 transition-transform group-hover:translate-x-0.5" />
                   </button>
                 ))}
               </div>
             </div>
           )}
 
-          {/* Manual Input Mode when student toggles it */}
+          {/* Manual Input Mode with Live Snippets & Keyboard Navigation */}
           {inputMode === 'manual' && !isCompleted && (
-            <div className="bg-white border border-slate-200 rounded-3xl p-5 shadow-xs space-y-3">
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 shadow-xs space-y-3.5">
               <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                   Modo Libre: Escribe tu propio paso
                 </span>
-                <span className="text-xs font-mono text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded">
+                <span className="text-xs font-mono text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950 px-2 py-0.5 rounded font-bold">
                   Línea {steps.length + 1}
                 </span>
               </div>
@@ -658,9 +849,9 @@ export const UocGym: React.FC<UocGymProps> = ({
                       key={sym}
                       onClick={() => {
                         sound.playClick();
-                        setManualFormula((prev) => prev + sym);
+                        setManualFormula((prev) => expandFormulaSnippets(prev + sym));
                       }}
-                      className="min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 active:bg-emerald-200 text-slate-800 dark:text-slate-200 font-bold text-sm transition-colors flex items-center justify-center border border-slate-200 dark:border-slate-700 cursor-pointer"
+                      className="min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 active:bg-indigo-200 text-slate-800 dark:text-slate-200 font-bold text-sm transition-colors flex items-center justify-center border border-slate-200 dark:border-slate-700 cursor-pointer"
                     >
                       {sym}
                     </button>
@@ -672,185 +863,176 @@ export const UocGym: React.FC<UocGymProps> = ({
                       key={letter}
                       onClick={() => {
                         sound.playClick();
-                        setManualFormula((prev) => prev + letter);
+                        setManualFormula((prev) => expandFormulaSnippets(prev + letter));
                       }}
-                      className="min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 active:bg-emerald-200 text-slate-800 dark:text-slate-200 font-bold text-sm transition-colors flex items-center justify-center border border-slate-200 dark:border-slate-700 cursor-pointer"
+                      className="min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 active:bg-indigo-200 text-slate-800 dark:text-slate-200 font-bold text-sm transition-colors flex items-center justify-center border border-slate-200 dark:border-slate-700 cursor-pointer"
                     >
                       {letter}
                     </button>
                   ))}
                   <button
                     onClick={() => setManualFormula('')}
-                    className="min-h-[44px] rounded-xl bg-rose-50 dark:bg-rose-950/60 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-300 font-bold text-xs transition-colors flex items-center justify-center border border-rose-200 dark:border-rose-800 cursor-pointer"
+                    className="min-h-[44px] rounded-xl bg-rose-50 dark:bg-rose-950/60 hover:bg-rose-100 text-rose-700 dark:text-rose-300 font-bold text-xs transition-colors flex items-center justify-center border border-rose-200 dark:border-rose-800 cursor-pointer"
                   >
                     DEL
                   </button>
                 </div>
               </div>
 
-              <input
-                type="text"
-                value={manualFormula}
-                onChange={(e) => setManualFormula(e.target.value)}
-                placeholder="Fórmula resultante (ej: p ∧ q)"
-                className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 font-mono text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-emerald-500 outline-none"
-              />
+              {/* Formula input with live snippets */}
+              <div>
+                <label className="text-[11px] font-semibold text-slate-500 block mb-1">
+                  {"Fórmula deducida (autocompleta '->' a '→', '&' a '∧', etc.):"}
+                </label>
+                <input
+                  type="text"
+                  value={manualFormula}
+                  onChange={(e) => setManualFormula(expandFormulaSnippets(e.target.value))}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleApplyManualStep();
+                  }}
+                  placeholder="ej: p → q  (o usa ->)"
+                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl px-3.5 py-2.5 font-mono text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                />
+              </div>
 
-              <select
-                value={manualRule}
-                onChange={(e) => setManualRule(e.target.value)}
-                className="w-full bg-white border border-slate-300 text-slate-800 text-xs font-semibold rounded-xl px-3 py-2.5 shadow-2xs outline-none"
-              >
-                {LOGIC_RULES.map((rule) => (
-                  <option key={rule.id} value={rule.uocNotation}>
-                    {rule.uocNotation} - {rule.name}
-                  </option>
-                ))}
-              </select>
+              {/* Rule selector */}
+              <div>
+                <label className="text-[11px] font-semibold text-slate-500 block mb-1">
+                  Regla de la UOC:
+                </label>
+                <select
+                  value={manualRule}
+                  onChange={(e) => setManualRule(e.target.value)}
+                  className="w-full bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200 text-xs font-semibold rounded-xl px-3 py-2.5 shadow-2xs outline-none"
+                >
+                  {LOGIC_RULES.filter((r) => ruleSetMode === 'complete' || !r.isDerived).map((rule) => {
+                    const label =
+                      notationStyle === 'symbol'
+                        ? `${rule.uocSymbol} - ${rule.name}`
+                        : `${rule.uocAcronym} - ${rule.name}`;
+                    return (
+                      <option key={rule.id} value={rule.uocSymbol}>
+                        {label}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
 
-              {stepError && (
-                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700">
-                  {stepError}
+              {/* Line citation checkboxes */}
+              <div>
+                <span className="text-[11px] font-semibold text-slate-500 block mb-1">
+                  Líneas citadas como premisas de la regla:
+                </span>
+                <div className="flex flex-wrap gap-1.5 font-mono text-xs">
+                  {steps.map((s) => {
+                    const isChecked = manualSelectedLines.includes(s.lineNum);
+                    const isLocked = !!s.isClosedBlock;
+                    return (
+                      <button
+                        key={s.lineNum}
+                        disabled={isLocked}
+                        onClick={() => {
+                          setManualSelectedLines((prev) =>
+                            prev.includes(s.lineNum)
+                              ? prev.filter((x) => x !== s.lineNum)
+                              : [...prev, s.lineNum]
+                          );
+                        }}
+                        className={`min-h-[36px] px-2.5 rounded-lg border font-bold transition-all flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed ${
+                          isLocked
+                            ? 'opacity-40 bg-slate-100 dark:bg-slate-800 text-slate-400 border-slate-200'
+                            : isChecked
+                            ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
+                            : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-700'
+                        }`}
+                        title={isLocked ? 'Línea de supuesto cerrado (no accesible)' : s.formula}
+                      >
+                        <span>{s.lineNum}</span>
+                        {isLocked && <Lock className="w-3 h-3 text-slate-400" />}
+                      </button>
+                    );
+                  })}
                 </div>
-              )}
+              </div>
 
+              {/* Action buttons */}
               <div className="flex gap-2 pt-1">
                 <button
-                  onClick={() => {
-                    if (!manualFormula.trim()) {
-                      setStepError('Escribe la fórmula que se deduce.');
-                      sound.playError();
-                      return;
-                    }
-                    sound.playClick();
-                    setStepError(null);
-                    const isClosing =
-                      manualRule.includes('I→') ||
-                      manualRule.includes('I¬') ||
-                      manualRule.includes('E∨') ||
-                      manualRule.includes('RAA');
-                    const nextDepth = isClosing ? Math.max(0, currentDepth - 1) : currentDepth;
-                    const newStep: ProofStep = {
-                      id: `step_${Date.now()}`,
-                      lineNum: steps.length + 1,
-                      formula: manualFormula.trim(),
-                      rule: manualRule,
-                      referencedLines: manualSelectedLines,
-                      depth: nextDepth,
-                      closesHypothesis: isClosing,
-                    };
-                    const updated = [...steps, newStep];
-                    setSteps(updated);
-                    setCurrentDepth(nextDepth);
-                    setManualFormula('');
-                    setManualSelectedLines([]);
-
-                    if (
-                      manualFormula.replace(/\s+/g, '') === currentExercise.goal.replace(/\s+/g, '') &&
-                      nextDepth === 0
-                    ) {
-                      sound.playLevelComplete();
-                      setIsCompleted(true);
-                      confetti({ particleCount: 90, spread: 70 });
-                      setLogiSpeech('¡Demostración completada con éxito!');
-                    }
-                  }}
-                  className="flex-1 min-h-[44px] py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shadow-xs transition-colors cursor-pointer"
+                  onClick={handleApplyManualStep}
+                  className="flex-1 min-h-[44px] py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white text-xs font-bold rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
                 >
-                  Aplicar Paso
+                  <Plus className="w-4 h-4" />
+                  <span>Aplicar Paso (Enter)</span>
                 </button>
                 <button
-                  onClick={() => {
-                    if (!manualFormula.trim()) {
-                      setStepError('Escribe la fórmula de la hipótesis.');
-                      sound.playError();
-                      return;
-                    }
-                    sound.playClick();
-                    setStepError(null);
-                    const newStep: ProofStep = {
-                      id: `step_${Date.now()}`,
-                      lineNum: steps.length + 1,
-                      formula: manualFormula.trim(),
-                      rule: 'Hipótesis',
-                      referencedLines: [],
-                      depth: currentDepth + 1,
-                      isHypothesis: true,
-                    };
-                    setSteps([...steps, newStep]);
-                    setCurrentDepth((prev) => prev + 1);
-                    setManualFormula('');
-                  }}
-                  className="min-h-[44px] py-2.5 px-3 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 text-xs font-bold rounded-xl transition-colors cursor-pointer"
+                  onClick={handleOpenManualHypothesis}
+                  className="min-h-[44px] py-2.5 px-3.5 bg-amber-50 dark:bg-amber-950/60 hover:bg-amber-100 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700 text-xs font-bold rounded-xl transition-colors cursor-pointer"
                 >
-                  [ Hipótesis ]
+                  [ Abrir Supuesto ]
                 </button>
               </div>
             </div>
           )}
 
-          {/* Feedback Drawer (Pedagogical explanation of last action) */}
-          {lastFeedback && (
-            <div
-              className={`p-4 rounded-2xl border text-xs sm:text-sm leading-relaxed flex items-start gap-3 animate-in fade-in duration-200 ${
-                lastFeedback.isCorrect
-                  ? 'bg-emerald-50 border-emerald-200 text-emerald-950'
-                  : 'bg-rose-50 border-rose-200 text-rose-950'
-              }`}
-            >
-              {lastFeedback.isCorrect ? (
-                <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
-              ) : (
-                <Info className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
-              )}
-              <div>
-                <strong className="block mb-0.5">
-                  {lastFeedback.isCorrect ? '¡Paso correcto!' : 'Paso no válido:'}
-                </strong>
-                <span>{lastFeedback.text}</span>
+          {/* Semantic Error Alert Modal / Panel with Truth Table Counterexamples */}
+          {semanticError && (
+            <div className="bg-rose-50 dark:bg-rose-950/70 border border-rose-300 dark:border-rose-800 rounded-3xl p-5 space-y-3 animate-in fade-in duration-200">
+              <div className="flex items-start gap-3">
+                <ShieldAlert className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                <div>
+                  <h4 className="font-extrabold text-sm text-rose-900 dark:text-rose-100">
+                    {semanticError.title || 'Error en la demostración'}
+                  </h4>
+                  <p className="text-xs text-rose-800 dark:text-rose-200 mt-1 leading-relaxed">
+                    {semanticError.explanation}
+                  </p>
+                  {semanticError.pedagogicHint && (
+                    <p className="text-xs font-semibold text-rose-950 dark:text-rose-100 mt-2 bg-rose-100/70 dark:bg-rose-900/60 p-2.5 rounded-xl border border-rose-200 dark:border-rose-800">
+                      💡 {semanticError.pedagogicHint}
+                    </p>
+                  )}
+                </div>
               </div>
+
+              {/* Counterexample if applicable */}
+              {semanticError.counterexampleTable && (
+                <div className="mt-2 bg-white dark:bg-slate-900 rounded-xl p-3 border border-rose-200 dark:border-rose-800 text-xs font-mono space-y-1">
+                  <span className="font-bold text-rose-700 dark:text-rose-300 block text-[11px]">
+                    Contraejemplo Semántico:
+                  </span>
+                  <div className="text-slate-500">{semanticError.counterexampleTable.rowDescription}</div>
+                  <div className="text-emerald-600">{semanticError.counterexampleTable.premiseTruth}</div>
+                  <div className="text-rose-600 font-bold">{semanticError.counterexampleTable.conclusionTruth}</div>
+                </div>
+              )}
             </div>
           )}
 
-          {/* Mascot Owl Live Guidance Box */}
-          <div className="bg-emerald-50 border border-emerald-200 rounded-3xl p-4 sm:p-5">
-            <MascotOwl
-              mood={isCompleted ? 'graduate' : 'thinking'}
-              className="w-14 h-14 mb-2"
-              speechText={logiSpeech}
-            />
-          </div>
-
-          {/* Victory Card when Finished */}
+          {/* Completion Celebration Card */}
           {isCompleted && (
-            <div className="bg-gradient-to-br from-emerald-600 via-teal-700 to-slate-900 text-white rounded-3xl p-6 text-center shadow-lg animate-in zoom-in-95 duration-200">
-              <div className="w-12 h-12 rounded-full bg-white text-emerald-800 flex items-center justify-center mx-auto mb-3 font-extrabold text-xl shadow-md">
+            <div className="bg-gradient-to-br from-indigo-600 via-indigo-700 to-slate-900 text-white rounded-3xl p-6 text-center shadow-lg animate-in zoom-in-95 duration-200">
+              <div className="w-12 h-12 rounded-full bg-white text-indigo-700 flex items-center justify-center mx-auto mb-3 font-extrabold text-xl shadow-md">
                 ✓
               </div>
-              <h3 className="text-lg font-extrabold mb-1">¡Demostración UOC Completada con Éxito!</h3>
-              <p className="text-xs sm:text-sm text-emerald-100 mb-5 leading-relaxed max-w-md mx-auto">
-                Has derivado <strong>{currentExercise.goal}</strong> siguiendo las reglas formales de Gentzen y Fitch. Este ejercicio ha quedado registrado con éxito.
+              <h3 className="text-lg font-extrabold mb-1">¡Deducción Completada!</h3>
+              <p className="text-xs sm:text-sm text-indigo-100 mb-5 leading-relaxed max-w-md mx-auto">
+                Has derivado formalmente <strong>{currentExercise.goal}</strong> con total rigor según
+                las reglas y alcance de cajas de Fitch de la UOC.
               </p>
 
-              <div className="flex flex-wrap items-center justify-center gap-3">
-                <button
-                  onClick={() => {
-                    const nextIdx =
-                      (UOC_EXAM_EXERCISES.findIndex((e) => e.id === currentExercise.id) + 1) %
-                      UOC_EXAM_EXERCISES.length;
-                    handleSelectExercise(UOC_EXAM_EXERCISES[nextIdx]);
-                  }}
-                  className="min-h-[44px] px-6 py-2.5 bg-white text-slate-950 font-bold rounded-xl text-xs sm:text-sm shadow-md hover:bg-emerald-50 transition-colors cursor-pointer"
-                >
-                  Siguiente Ejercicio UOC
-                </button>
-                <button
-                  onClick={handleReset}
-                  className="min-h-[44px] px-4 py-2.5 bg-emerald-800/60 hover:bg-emerald-800 text-white font-semibold rounded-xl text-xs sm:text-sm transition-colors border border-emerald-500/30 cursor-pointer"
-                >
-                  Volver a Repetir
-                </button>
-              </div>
+              <button
+                onClick={() => {
+                  const nextIdx =
+                    (activeList.findIndex((e) => e.id === currentExercise.id) + 1) %
+                    activeList.length;
+                  handleSelectExercise(activeList[nextIdx]);
+                }}
+                className="px-6 py-2.5 bg-white text-slate-950 font-bold rounded-xl text-xs sm:text-sm shadow-md hover:bg-indigo-50 transition-colors cursor-pointer"
+              >
+                Siguiente Ejercicio UOC
+              </button>
             </div>
           )}
         </div>

@@ -10,7 +10,7 @@ import { MascotOwl } from './MascotOwl';
 export const ProofBuilder: React.FC = () => {
   const [selectedChallenge, setSelectedChallenge] = useState<SandboxChallenge>(SANDBOX_CHALLENGES[0]);
   const [steps, setSteps] = useState<ProofStep[]>(() => {
-    return SANDBOX_CHALLENGES[0].premises.map((p, idx) => ({
+    return SANDBOX_CHALLENGES[0].premises.map((p: string, idx: number) => ({
       id: `p_${idx}`,
       lineNum: idx + 1,
       formula: p,
@@ -32,7 +32,7 @@ export const ProofBuilder: React.FC = () => {
     sound.playClick();
     setSelectedChallenge(challenge);
     setSteps(
-      challenge.premises.map((p, idx) => ({
+      challenge.premises.map((p: string, idx: number) => ({
         id: `p_${idx}`,
         lineNum: idx + 1,
         formula: p,
